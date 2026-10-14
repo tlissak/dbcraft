@@ -1,0 +1,53 @@
+# Test servers for the drivers. Ports are offset so they don't clash with local installs.
+#   docker compose -f dev/docker-compose.yml up -d
+#   cargo test -p dbcraft-drivers --test servers -- --ignored
+# Credentials are dev-only: user `dbcraft`, password `dbcraft`, database `sakila_lite`.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: dbcraft
+      POSTGRES_PASSWORD: dbcraft
+      POSTGRES_DB: sakila_lite
+    ports: ["15432:5432"]
+    volumes: ["./seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: dbcraft
+      MYSQL_USER: dbcraft
+      MYSQL_PASSWORD: dbcraft
+      MYSQL_DATABASE: sakila_lite
+    ports: ["13306:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+
+  mariadb:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: dbcraft
+      MARIADB_USER: dbcraft
+      MARIADB_PASSWORD: dbcraft
+      MARIADB_DATABASE: sakila_lite
+    ports: ["13307:3306"]
+    volumes: ["./seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro"]
+
+  # SSH bastion for tunnel tests: ssh dbcraft@127.0.0.1 -p 12222 (password dbcraft). From inside,
+  # the databases are reachable as postgres:5432, mysql:3306, mariadb:3306.
+  ssh:
+    image: lscr.io/linuxserver/openssh-server:latest
+    environment:
+      PASSWORD_ACCESS: "true"
+      USER_NAME: dbcraft
+      USER_PASSWORD: dbcraft
+      DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
+    ports: ["12222:2222"]
+
+  # Not wired to a driver yet (docs/gaps.md); here so the next driver has a server to test against.
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: ["later"]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Dbcraft!2026"
+    ports: ["11433:1433"]

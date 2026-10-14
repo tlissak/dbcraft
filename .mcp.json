@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dbcraft": {
+      "command": "target/debug/dbcraft-cli.exe",
+      "args": ["mcp"],
+      "env": { "DBCRAFT_WORKSPACE": "dev/data/workspace.json" }
+    }
+  }
+}

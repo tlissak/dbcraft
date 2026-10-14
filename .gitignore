@@ -1,0 +1,8 @@
+/target
+/log/
+/plan/
+/dev/data/
+*.db
+*.sqlite
+!/dev/seed/*.sql
+.env

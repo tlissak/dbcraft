@@ -1,0 +1,18 @@
+[package]
+name = "dbcraft-drivers"
+description = "L2 database drivers behind one blocking trait (SQLite, PostgreSQL, MySQL/MariaDB via sqlx)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dbcraft-core.workspace = true
+dbcraft-model.workspace = true
+dbcraft-sql.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+russh.workspace = true
+
+[lints]
+workspace = true
