@@ -698,6 +698,10 @@ impl DbCraftApp {
                             && let Some(job) = self.session.workspace.automations.iter_mut().find(|j| j.id == id)
                         {
                             job.last_run = res["summary"].as_str().map(str::to_string);
+                            // Keep the copy on screen in step, or it would look "unsaved".
+                            if let Some(e) = v.editing.as_mut().filter(|e| e.id == id) {
+                                e.last_run = job.last_run.clone();
+                            }
                             let _ = self.session.save_workspace();
                         }
                     }

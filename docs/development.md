@@ -63,3 +63,14 @@ $cli sql pg "select * from film_list"
 1. New module in `crates/drivers/src/`, implement `Connection`, route it in `connect()` and `supported_kinds()`.
 2. Add a docker service in `dev/docker-compose.yml` and seed SQL.
 3. Add it to `crates/drivers/tests/servers.rs`.
+
+## README screenshots
+
+The images in `docs/images/` are rendered offscreen from the real app (egui_kittest + wgpu), no window and no desktop capture:
+
+```sh
+docker compose -f dev/docker-compose.yml up -d   # optional: the Objects shot uses the docker MySQL when it's up
+cargo run -p dbcraft-ui-egui --example screenshots -- docs/images
+```
+
+The script (`crates/ui-egui/examples/screenshots.rs`) builds a demo SQLite database of public-domain films, drives the UI (clicks, filters, edits) and saves each screen. Update it when a screen changes, and look at the PNGs before committing.

@@ -23,4 +23,5 @@ serde_json.workspace = true
 workspace = true
 
 [dev-dependencies]
-egui_kittest = { workspace = true, features = ["eframe"] }
+egui_kittest = { workspace = true, features = ["eframe", "wgpu", "snapshot"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
