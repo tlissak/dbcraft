@@ -13,6 +13,7 @@ eframe.workspace = true
 egui.workspace = true
 directories.workspace = true
 env_logger.workspace = true
+log.workspace = true
 
 [lints]
 workspace = true

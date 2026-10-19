@@ -1189,6 +1189,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "log",
 ]
 
 [[package]]
@@ -1272,7 +1273,9 @@ dependencies = [
  "egui-phosphor",
  "egui_extras",
  "egui_kittest",
+ "getrandom 0.3.4",
  "image",
+ "png",
  "rfd",
  "serde",
  "serde_json",

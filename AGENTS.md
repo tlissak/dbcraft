@@ -101,4 +101,5 @@ Then append a terse entry to `log/devlog.md` (what landed, numbers, what's still
 - `dbcraft-cli commands` lists every command and its params.
 - `dbcraft-cli cmd <id> '<json>'` runs one; `dbcraft-cli sql <conn-id> "<sql>"` runs SQL.
 - `dbcraft-cli mcp` is an MCP server; `.mcp.json` registers it for Claude Code (tools are command ids with `.` → `_`).
+- To drive and see the *running app*, start `dbcraft --control` and use `dbcraft-cli control <method>` (ping, action, input, wait_idle, state, snapshot, dispatch, ui); see `docs/development.md`.
 - Set `DBCRAFT_WORKSPACE=dev/data/workspace.json` so you never touch the user's real saved connections.

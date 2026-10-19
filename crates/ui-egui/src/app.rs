@@ -120,6 +120,14 @@ pub struct DbCraftApp {
     bg: Vec<(Task, Then)>,
     /// Actions waiting for a connection that is still opening.
     after_open: Vec<(String, Action)>,
+    /// `--control`: the listener, and requests waiting for a later frame.
+    control: Option<crate::control::ControlServer>,
+    control_waits: Vec<(crate::control::Request, std::time::Instant)>,
+    control_shots: Vec<(crate::control::Request, std::path::PathBuf)>,
+    /// Input events from `input` requests, fed to egui on the next frame.
+    injected: Vec<egui::Event>,
+    /// Requests answered once the frame that used their input is drawn.
+    after_frame: Vec<crate::control::Request>,
     /// Options the theme and display formats were last set from.
     applied_options: Option<dbcraft_model::Options>,
     /// Tests: wait for each background task right after starting it, so a frame later its result
@@ -178,7 +186,135 @@ impl DbCraftApp {
             bg: Vec::new(),
             after_open: Vec::new(),
             applied_options: None,
+            control: None,
+            control_waits: Vec::new(),
+            control_shots: Vec::new(),
+            injected: Vec::new(),
+            after_frame: Vec::new(),
             wait_for_tasks: false,
+        }
+    }
+
+    /// Start the control channel (`--control`): 127.0.0.1:`port` (0 picks one), token and address
+    /// written to `control.json` next to the workspace. Returns the address and token.
+    pub fn start_control(&mut self, ctx: &egui::Context, port: u16) -> std::io::Result<(std::net::SocketAddr, String)> {
+        let dir = self.session.workspace_path.as_ref().and_then(|p| p.parent()).map(std::path::Path::to_path_buf);
+        let server = crate::control::ControlServer::start(ctx.clone(), port, dir)?;
+        let out = (server.addr, server.token.clone());
+        self.control = Some(server);
+        Ok(out)
+    }
+
+    /// Input events from control `input` requests, for the next frame (eframe's `raw_input_hook`;
+    /// kittest harnesses feed them with `Harness::event`).
+    pub fn take_injected(&mut self) -> Vec<egui::Event> {
+        std::mem::take(&mut self.injected)
+    }
+
+    /// Answer control requests (between frames, on the UI thread).
+    fn poll_control(&mut self, ctx: &egui::Context) {
+        // Screenshots requested last frame.
+        if !self.control_shots.is_empty() {
+            let shot = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                for (req, path) in std::mem::take(&mut self.control_shots) {
+                    match crate::control::write_png(&image, &path) {
+                        Ok(()) => req.ok(json!({ "path": path.to_string_lossy(), "size": image.size })),
+                        Err(e) => req.err(e),
+                    }
+                }
+            }
+        }
+        // Input that has now been through a frame.
+        for req in std::mem::take(&mut self.after_frame) {
+            req.ok(json!({}));
+        }
+        let now = std::time::Instant::now();
+        let idle = !self.is_busy() && self.startup.is_empty() && self.injected.is_empty();
+        let waits = std::mem::take(&mut self.control_waits);
+        for (req, deadline) in waits {
+            if idle {
+                req.ok(json!({}));
+            } else if now > deadline {
+                req.err("still busy at the timeout");
+            } else {
+                self.control_waits.push((req, deadline));
+            }
+        }
+        if !self.control_waits.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(20));
+        }
+        let Some(server) = &self.control else { return };
+        for req in server.pending() {
+            self.control_request(ctx, req);
+        }
+    }
+
+    fn control_request(&mut self, ctx: &egui::Context, req: crate::control::Request) {
+        let body = req.body.clone();
+        let str_of = |k: &str| body.get(k).and_then(Json::as_str).map(str::to_string);
+        let method = req.method().to_string();
+        match method.as_str() {
+            "ping" => req.ok(json!({ "app": "DbCraft", "version": env!("CARGO_PKG_VERSION") })),
+            "commands" => req.ok(json!({ "engine": crate::engine_command_ids(), "ui": crate::UI_COMMANDS })),
+            "dispatch" => {
+                let Some(id) = str_of("id") else { return req.err("`id` (command id) is required") };
+                let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
+                match self.session.dispatch(&id, &params) {
+                    Ok(v) => req.ok(json!({ "result": v })),
+                    Err(e) => req.err(e),
+                }
+            }
+            "ui" => match str_of("id") {
+                Some(id) if crate::UI_COMMANDS.contains(&id.as_str()) => {
+                    if let Some(&id) = crate::UI_COMMANDS.iter().find(|u| **u == id) {
+                        self.ui_command(ctx, id);
+                    }
+                    req.ok(json!({}));
+                }
+                Some(id) => req.err(format!("`{id}` is not a UI command (see `commands`)")),
+                None => req.err("`id` is required"),
+            },
+            "action" => match body.get("action").map(startup_action) {
+                Some(Ok(a)) => {
+                    self.startup(a);
+                    req.ok(json!({}));
+                }
+                Some(Err(e)) => req.err(e),
+                None => req.err("`action` is required"),
+            },
+            "input" => match body.get("events").map(crate::control::parse_events) {
+                Some(Ok(events)) => {
+                    self.injected.extend(events);
+                    self.after_frame.push(req);
+                }
+                Some(Err(e)) => req.err(e),
+                None => req.err("`events` is required"),
+            },
+            "wait_idle" => {
+                let ms = body.get("timeout_ms").and_then(Json::as_u64).unwrap_or(30_000).min(600_000);
+                self.control_waits.push((req, std::time::Instant::now() + std::time::Duration::from_millis(ms)));
+            }
+            "state" => {
+                let mut state = serde_json::to_value(&self.state).unwrap_or_default();
+                crate::control::redact(&mut state);
+                let open: Vec<&str> = self.session.workspace.connections.iter().filter(|c| self.session.is_open(&c.id)).map(|c| c.id.as_str()).collect();
+                req.ok(json!({ "ui": state, "open_connections": open, "busy": self.is_busy() }));
+            }
+            "snapshot" => match str_of("path") {
+                Some(path) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                    self.control_shots.push((req, std::path::PathBuf::from(path)));
+                    ctx.request_repaint();
+                }
+                None => req.err("`path` (where to write the PNG) is required"),
+            },
+            other => req.err(format!("unknown method `{other}` (ping, commands, dispatch, ui, action, input, wait_idle, state, snapshot)")),
         }
     }
 
@@ -1473,6 +1609,25 @@ impl DbCraftApp {
     }
 }
 
+/// A control-channel `action` (same shapes as the command-line startup flags).
+fn startup_action(v: &Json) -> Result<StartupAction, String> {
+    let s = |k: &str| v.get(k).and_then(Json::as_str).map(str::to_string);
+    let need = |k: &str| s(k).ok_or_else(|| format!("`{k}` is required"));
+    Ok(match s("type").as_deref() {
+        Some("select") => StartupAction::Select { connection: need("connection")?, database: s("database") },
+        Some("open_table") => {
+            StartupAction::OpenTable { connection: need("connection")?, database: need("database")?, schema: s("schema"), table: need("table")? }
+        }
+        Some("new_connection") => StartupAction::NewConnection,
+        Some("console") => StartupAction::Console { connection: need("connection")?, database: s("database") },
+        Some("new_query") => StartupAction::NewQuery { connection: need("connection")?, database: s("database"), sql: s("sql").unwrap_or_default() },
+        Some("tool") => StartupAction::Tool(need("tool")?),
+        Some("mode") => StartupAction::Mode(need("mode")?),
+        Some(other) => return Err(format!("unknown action type `{other}`")),
+        None => return Err("`action.type` is required (select, open_table, new_connection, console, new_query, tool, mode)".into()),
+    })
+}
+
 /// The running task of a query, table or console tab.
 fn tab_task(t: &Tab) -> Option<&Task> {
     match t {
@@ -1521,6 +1676,11 @@ fn icon_job(glyph: &str, color: egui::Color32, size: f32, label: &str) -> egui::
 }
 
 impl eframe::App for DbCraftApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        // Control channel `input` events join this frame's input.
+        raw_input.events.extend(self.take_injected());
+    }
+
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = &root.ctx().clone();
         if !self.themed {
@@ -1529,6 +1689,7 @@ impl eframe::App for DbCraftApp {
         }
         self.ctx_for_jobs = ctx.clone();
         self.apply_options(ctx);
+        self.poll_control(ctx);
         self.poll_jobs();
         self.poll_tasks(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {

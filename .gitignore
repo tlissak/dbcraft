@@ -6,3 +6,5 @@
 *.sqlite
 !/dev/seed/*.sql
 .env
+# Control channel address and token of a running app (see docs/development.md).
+control.json

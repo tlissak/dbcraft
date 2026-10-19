@@ -2,6 +2,7 @@
 
 //! dbcraft [--select <conn>[/<db>]] [--open-table <conn>/<db>/[<schema>.]<table>] [--new-connection]
 //!         [--console <conn>[/<db>]] [--tool transfer|automation] [--mode queries|backups|users]
+//!         [--control [port]]   control channel on 127.0.0.1 for agents (see `dbcraft-cli control`)
 
 use std::path::PathBuf;
 
@@ -16,12 +17,21 @@ fn workspace_path() -> PathBuf {
     directories::ProjectDirs::from("ai", "dbcraft", "DbCraft").map(|d| d.config_dir().join("workspace.json")).unwrap_or_else(|| PathBuf::from("workspace.json"))
 }
 
-fn parse_args() -> Vec<StartupAction> {
+/// Startup actions, and the control port when `--control` is given (0: any free port).
+fn parse_args() -> (Vec<StartupAction>, Option<u16>) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut out = Vec::new();
-    let mut it = args.iter();
+    let mut control = None;
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--control" => {
+                let port = it.peek().and_then(|p| p.parse::<u16>().ok());
+                if port.is_some() {
+                    it.next();
+                }
+                control = Some(port.unwrap_or(0));
+            }
             "--select" => {
                 if let Some(v) = it.next() {
                     let (c, d) = v.split_once('/').map_or((v.as_str(), None), |(c, d)| (c, Some(d.to_string())));
@@ -55,12 +65,12 @@ fn parse_args() -> Vec<StartupAction> {
             other => eprintln!("dbcraft: ignoring unknown argument `{other}`"),
         }
     }
-    out
+    (out, control)
 }
 
 fn main() -> eframe::Result {
     env_logger::init();
-    let startup = parse_args();
+    let (startup, control) = parse_args();
     let (mut session, err) = Session::with_workspace_file(workspace_path());
     // The user's own workspace keeps passwords in the OS keychain; an overridden one (dev, tests,
     // portable) keeps whatever mode its file says.
@@ -73,10 +83,16 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "DbCraft",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
             let mut app = DbCraftApp::new(session, err);
             for a in startup {
                 app.startup(a);
+            }
+            if let Some(port) = control {
+                match app.start_control(&cc.egui_ctx, port) {
+                    Ok((addr, _)) => log::info!("control channel on {addr} (token in control.json next to the workspace)"),
+                    Err(e) => app.state.status = Some(format!("control channel: {e}")),
+                }
             }
             Ok(Box::new(app))
         }),

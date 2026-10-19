@@ -5,6 +5,7 @@ pub(crate) mod app;
 mod automation_tab;
 mod conn_dialog;
 mod console_tab;
+pub mod control;
 pub mod display;
 pub mod grid;
 pub mod icons;

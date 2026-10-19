@@ -48,6 +48,21 @@ $cli sql pg "select * from film_list"
 
 - CLI: `dbcraft-cli cmd <id> '<json>'`. Each process is a fresh session (connections are re-opened); the workspace persists.
 - MCP: `dbcraft-cli mcp` (stdio). `.mcp.json` registers it for Claude Code once `target/debug/dbcraft-cli.exe` is built. The MCP session is long-lived, so `connection_open` then `query_run` works across calls.
+- **The running app** (control channel): start `dbcraft --control [port]`. It listens on 127.0.0.1 only and writes `{"addr", "token", "pid"}` to `control.json` next to the workspace; the file is removed on exit. Then:
+
+  ```sh
+  export DBCRAFT_WORKSPACE=dev/data/workspace.json
+  dbcraft-cli control ping
+  dbcraft-cli control action '{"action":{"type":"open_table","connection":"pg","database":"sakila_lite","table":"film"}}'
+  dbcraft-cli control wait_idle '{"timeout_ms":15000}'
+  dbcraft-cli control input '{"events":[{"text":"select 1"},{"key":"R","ctrl":true},{"click":[400,300]}]}'
+  dbcraft-cli control snapshot '{"path":"C:/tmp/dbcraft.png"}'     # PNG of the window
+  dbcraft-cli control state                                       # UiState (passwords masked)
+  dbcraft-cli control dispatch '{"id":"tools.options","params":{"set":{"theme":"dark"}}}'
+  dbcraft-cli control ui '{"id":"ui.exit"}'
+  ```
+
+  The protocol is one JSON object per line over TCP, each carrying `"token"` (see `crates/ui-egui/src/control.rs`). Action types match the startup flags: `select`, `open_table`, `new_connection`, `console`, `new_query`, `tool`, `mode`.
 
 ## Adding a command (checklist)
 

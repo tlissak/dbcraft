@@ -5,6 +5,8 @@
 //!   dbcraft-cli sql <connection-id> <sql> [db]   open a saved connection and run SQL
 //!   dbcraft-cli mcp                              MCP server on stdio
 //!   dbcraft-cli batchjob <id|name>               run an Automation batch job (what scheduled tasks call)
+//!   dbcraft-cli control <method> [json-fields]   drive a running `dbcraft --control` (ping, state,
+//!                                                dispatch, action, ui, input, wait_idle, snapshot)
 //!
 //! Uses the same workspace as the desktop app (override with `--workspace <file>` or
 //! DBCRAFT_WORKSPACE).
@@ -23,7 +25,9 @@ fn workspace_path() -> PathBuf {
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: dbcraft-cli [--workspace <file>] commands | cmd <id> [json] | sql <connection-id> <sql> [database] | mcp | batchjob <id|name>");
+    eprintln!(
+        "usage: dbcraft-cli [--workspace <file>] commands | cmd <id> [json] | sql <connection-id> <sql> [database] | mcp | batchjob <id|name> | control <method> [json]"
+    );
     ExitCode::from(2)
 }
 
@@ -49,6 +53,9 @@ fn main() -> ExitCode {
         ws = PathBuf::from(path);
         overridden = true;
         args.drain(i..=i + 1);
+    }
+    if args.first().map(String::as_str) == Some("control") {
+        return control(&ws, args.get(1).map(String::as_str), args.get(2).map(String::as_str));
     }
     let (mut session, err) = Session::with_workspace_file(ws);
     if let Some(e) = err {
@@ -122,5 +129,51 @@ fn main() -> ExitCode {
             }
         },
         _ => usage(),
+    }
+}
+
+/// Send one request to a running `dbcraft --control` (address and token from `control.json` next
+/// to the workspace) and print the reply.
+fn control(ws: &std::path::Path, method: Option<&str>, fields: Option<&str>) -> ExitCode {
+    use std::io::{BufRead, BufReader, Write};
+    let Some(method) = method else { return usage() };
+    let info_path = ws.parent().map(|d| d.join("control.json")).unwrap_or_else(|| PathBuf::from("control.json"));
+    let info: Json = match std::fs::read_to_string(&info_path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {}: {e} (is `dbcraft --control` running with this workspace?)", info_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut req = match fields.map(serde_json::from_str::<Json>).transpose() {
+        Ok(Some(Json::Object(o))) => Json::Object(o),
+        Ok(None) => json!({}),
+        Ok(Some(_)) | Err(_) => {
+            eprintln!("error: the request fields must be a JSON object");
+            return ExitCode::from(2);
+        }
+    };
+    req["method"] = json!(method);
+    req["token"] = info["token"].clone();
+    let addr = info["addr"].as_str().unwrap_or_default();
+    let result = std::net::TcpStream::connect(addr).and_then(|mut s| {
+        writeln!(s, "{req}")?;
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line)?;
+        Ok(line)
+    });
+    match result.map(|l| serde_json::from_str::<Json>(&l)) {
+        Ok(Ok(reply)) => {
+            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
+            if reply["ok"] == json!(true) { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+        }
+        Ok(Err(e)) => {
+            eprintln!("error: bad reply: {e}");
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("error: {addr}: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
