@@ -104,6 +104,56 @@ impl PasswordStorage {
     }
 }
 
+/// Tools › Options. Every field has a default, so older workspace files load unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Options {
+    /// Appearance: `light` or `dark`.
+    pub theme: String,
+    /// Toolbar: large icons (Navicat's "Use Big Icons") and labels under them ("Show Caption").
+    pub big_icons: bool,
+    pub show_caption: bool,
+    /// Editor: font size in points, and soft-wrap long lines.
+    pub editor_font_size: f32,
+    pub word_wrap: bool,
+    /// Records: rows per page in the table viewer; off loads up to the engine's maximum.
+    pub limit_records: bool,
+    pub page_size: u64,
+    /// Tabs: ask before closing a query with unsaved changes.
+    pub confirm_close: bool,
+    /// Display formats: how NULL reads, and strftime formats for dates and times (empty: as the
+    /// server returns them).
+    pub null_text: String,
+    pub date_format: String,
+    pub time_format: String,
+    pub datetime_format: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            theme: "light".into(),
+            big_icons: true,
+            show_caption: true,
+            editor_font_size: 13.0,
+            word_wrap: false,
+            limit_records: true,
+            page_size: 1000,
+            confirm_close: true,
+            null_text: "(NULL)".into(),
+            date_format: String::new(),
+            time_format: String::new(),
+            datetime_format: String::new(),
+        }
+    }
+}
+
+impl Options {
+    fn is_default(&self) -> bool {
+        *self == Options::default()
+    }
+}
+
 /// Saved state: connections, queries, batch jobs. Persisted as `workspace.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -118,6 +168,8 @@ pub struct Workspace {
     pub queries: Vec<SavedQuery>,
     #[serde(default)]
     pub automations: Vec<BatchJob>,
+    #[serde(default, skip_serializing_if = "Options::is_default")]
+    pub options: Options,
 }
 
 /// A fresh id like `{prefix}-3` not in `taken`.

@@ -38,6 +38,7 @@ pub fn commands() -> Vec<CommandSpec> {
     v.extend(crate::transfer_cmds::specs());
     v.extend(crate::backup_cmds::specs());
     v.extend(crate::automation_cmds::specs());
+    v.extend(crate::options_cmds::specs());
     v.extend(crate::user_cmds::specs());
     v
 }

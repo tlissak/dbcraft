@@ -78,17 +78,10 @@ pub fn edit_params(tab: &TableTab) -> Option<Json> {
     Some(json!({"connection": tab.connection, "database": tab.database, "schema": tab.schema, "table": tab.table, "changes": changes}))
 }
 
-fn shown(v: &Value) -> (String, bool) {
-    match v {
-        Value::Null => ("(NULL)".into(), true),
-        other => (other.display(), false),
-    }
-}
-
 pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::Dialect, actions: &mut Vec<Action>) {
     let Some(page) = tab.page.clone() else {
         if let Some(e) = &tab.error {
-            ui.colored_label(Tokens::ERROR, e);
+            ui.colored_label(Tokens::error(), e);
             if ui.button(format!("{} Retry", icons::ARROWS_CLOCKWISE)).clicked() {
                 actions.push(Action::ReloadTable(idx));
             }
@@ -105,7 +98,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
     let dirty = tab.dirty();
 
     // Toolbar.
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.add_enabled(false, egui::Button::new("Begin Transaction")).on_disabled_hover_text("Changes are applied in one transaction by Apply");
             let filter_label =
@@ -119,7 +112,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
             ui.add_enabled(false, egui::Button::new(format!("{} Import", icons::DOWNLOAD_SIMPLE))).on_disabled_hover_text("Coming soon");
             ui.add_enabled(false, egui::Button::new(format!("{} Export", icons::UPLOAD_SIMPLE))).on_disabled_hover_text("Coming soon");
             if dirty {
-                ui.colored_label(Tokens::ACCENT, format!("{} pending changes", tab.edits.len() + tab.deleted.len() + tab.inserted.len()));
+                ui.colored_label(Tokens::accent(), format!("{} pending changes", tab.edits.len() + tab.deleted.len() + tab.inserted.len()));
             }
         });
     });
@@ -128,7 +121,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
         filter_bar(ui, idx, tab, &names, dirty, actions);
     }
     if let Some(e) = &tab.error {
-        ui.colored_label(Tokens::ERROR, format!("{} {e}", icons::X));
+        ui.colored_label(Tokens::error(), format!("{} {e}", icons::X));
     }
     if let Some(task) = &tab.task
         && crate::tasks::running_bar(ui, task, "Loading…")
@@ -171,7 +164,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
             .header(24.0, |mut h| {
                 h.col(|ui| {
                     let rect = ui.max_rect();
-                    ui.painter().rect_filled(rect, 0.0, Tokens::GRID_HEADER);
+                    ui.painter().rect_filled(rect, 0.0, Tokens::grid_header());
                     if ui.allocate_rect(rect, egui::Sense::click()).on_hover_text("Select All (Ctrl+A)").clicked() {
                         tab.grid = GridSel::All;
                     }
@@ -179,7 +172,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
                 for (c, name) in names.iter().enumerate() {
                     h.col(|ui| {
                         let rect = ui.max_rect();
-                        ui.painter().rect_filled(rect, 0.0, if tab.grid.col_fully_selected(c) { Tokens::SELECTION_STROKE } else { Tokens::GRID_HEADER });
+                        ui.painter().rect_filled(rect, 0.0, if tab.grid.col_fully_selected(c) { Tokens::selection_stroke() } else { Tokens::grid_header() });
                         let mut label = String::new();
                         if page.primary_key.contains(name) {
                             label.push_str(icons::KEY);
@@ -191,9 +184,9 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
                         ui.horizontal(|ui| {
                             // Sort toggle (asc → desc → none); clicking the name selects the column.
                             let arrow = match sorted {
-                                Some(true) => RichText::new(icons::SORT_DESCENDING).color(Tokens::ACCENT),
-                                Some(false) => RichText::new(icons::SORT_ASCENDING).color(Tokens::ACCENT),
-                                None => RichText::new(icons::SORT_ASCENDING).color(Tokens::CLOSED),
+                                Some(true) => RichText::new(icons::SORT_DESCENDING).color(Tokens::accent()),
+                                Some(false) => RichText::new(icons::SORT_ASCENDING).color(Tokens::accent()),
+                                None => RichText::new(icons::SORT_ASCENDING).color(Tokens::closed()),
                             };
                             if ui.add(egui::Button::new(arrow).frame(false).small()).on_hover_text("Sort").clicked() {
                                 sort_click = Some(name.clone());
@@ -251,11 +244,11 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
                             let pending: Option<&Option<String>> =
                                 if inserted { tab.inserted.get(r - loaded).and_then(|m| m.get(&c)) } else { tab.edits.get(&(r, c)) };
                             let bg = if deleted {
-                                Some(Tokens::DELETED)
+                                Some(Tokens::deleted())
                             } else if inserted {
-                                Some(Tokens::INSERTED)
+                                Some(Tokens::inserted())
                             } else if pending.is_some() {
-                                Some(Tokens::EDITED)
+                                Some(Tokens::edited())
                             } else {
                                 None
                             };
@@ -276,14 +269,16 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
                                 return;
                             }
                             let (text, weak) = match pending {
-                                Some(None) => ("(NULL)".to_string(), true),
+                                Some(None) => (crate::display::null_text(), true),
                                 Some(Some(s)) => (s.clone(), false),
                                 None if inserted => ("(default)".to_string(), true),
-                                None => original.map(shown).unwrap_or_default(),
+                                None => original
+                                    .map(|v| crate::display::cell(v, page.result.columns.get(c).map_or("", |col| col.type_name.as_str())))
+                                    .unwrap_or_default(),
                             };
                             let mut rt = RichText::new(text);
                             if weak {
-                                rt = rt.color(Tokens::TEXT_WEAK).italics();
+                                rt = rt.color(Tokens::text_weak()).italics();
                             }
                             if deleted {
                                 rt = rt.strikethrough();
@@ -515,7 +510,7 @@ fn keyboard(ui: &Ui, tab: &mut TableTab, loaded: usize) {
 }
 
 fn filter_bar(ui: &mut Ui, idx: usize, tab: &mut TableTab, names: &[String], dirty: bool, actions: &mut Vec<Action>) {
-    egui::Frame::new().fill(Tokens::PANEL_BG).stroke(egui::Stroke::new(1.0, Tokens::BORDER)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::panel_bg()).stroke(egui::Stroke::new(1.0, Tokens::border())).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
         let mut remove = None;
         for (i, f) in tab.filters.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -600,14 +595,14 @@ fn bottom_bar(ui: &mut Ui, idx: usize, tab: &mut TableTab, page: &dbcraft_engine
             }
         }
         let apply = ui
-            .add_enabled(dirty, egui::Button::new(RichText::new(icons::CHECK).color(if dirty { Tokens::SUCCESS } else { Tokens::TEXT_WEAK })))
+            .add_enabled(dirty, egui::Button::new(RichText::new(icons::CHECK).color(if dirty { Tokens::success() } else { Tokens::text_weak() })))
             .on_hover_text("Apply Changes (Ctrl+S)");
         if apply.clicked() || (dirty && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S))) {
             tab.editing = None;
             actions.push(Action::ApplyTable(idx));
         }
         if ui
-            .add_enabled(dirty, egui::Button::new(RichText::new(icons::X).color(if dirty { Tokens::ERROR } else { Tokens::TEXT_WEAK })))
+            .add_enabled(dirty, egui::Button::new(RichText::new(icons::X).color(if dirty { Tokens::error() } else { Tokens::text_weak() })))
             .on_hover_text("Discard Changes")
             .clicked()
         {
@@ -618,7 +613,7 @@ fn bottom_bar(ui: &mut Ui, idx: usize, tab: &mut TableTab, page: &dbcraft_engine
             actions.push(Action::ReloadTable(idx));
         }
         ui.separator();
-        ui.add(egui::Label::new(RichText::new(&page.sql).color(Tokens::TEXT_WEAK).small()).truncate());
+        ui.add(egui::Label::new(RichText::new(&page.sql).color(Tokens::text_weak()).small()).truncate());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let limit = tab.limit.max(1);
             let last_offset = page.total.saturating_sub(1) / limit * limit;

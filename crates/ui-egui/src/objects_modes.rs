@@ -12,7 +12,7 @@ use crate::state::{ObjectsView, Selection};
 use crate::theme::{self, Tokens};
 
 fn toolbar(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(add);
     });
 }
@@ -83,7 +83,7 @@ pub fn queries(ui: &mut Ui, session: &Session, sel: &Selection, view: &mut Objec
                     ui.label(fmt_time(q.modified));
                 });
                 row.col(|ui| {
-                    ui.add(egui::Label::new(RichText::new(q.sql.replace('\n', " ")).color(Tokens::TEXT_WEAK)).truncate());
+                    ui.add(egui::Label::new(RichText::new(q.sql.replace('\n', " ")).color(Tokens::text_weak())).truncate());
                 });
                 let r = row.response();
                 if r.double_clicked() {
@@ -204,7 +204,7 @@ pub fn backups(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &m
                 ui.label("Delete this backup file? This cannot be undone.");
                 ui.weak(&path);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Delete").color(Tokens::ERROR)).clicked() {
+                    if ui.button(RichText::new("Delete").color(Tokens::error())).clicked() {
                         actions.push(Action::BackupDelete(path.clone()));
                         view.confirm_delete_backup = None;
                     }
@@ -229,7 +229,7 @@ pub fn backups(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &m
             .show(ui.ctx(), |ui| {
                 ui.label(format!("Restore this backup into `{db}`?"));
                 ui.weak(&path);
-                ui.colored_label(Tokens::ERROR, "Tables in the backup are dropped and recreated: their current data is replaced.");
+                ui.colored_label(Tokens::error(), "Tables in the backup are dropped and recreated: their current data is replaced.");
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("Restore").strong()).clicked() {
                         actions.push(Action::BackupRestore(path.clone()));
@@ -277,7 +277,7 @@ pub fn users(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &mut
             return;
         }
         Some(Err(e)) => {
-            ui.colored_label(Tokens::ERROR, e);
+            ui.colored_label(Tokens::error(), e);
             if e.contains("denied") || e.contains("permission") {
                 ui.weak("Managing users needs an administrator account (for example root on MySQL/MariaDB, or a superuser on PostgreSQL). Edit the connection to use one.");
             }
@@ -321,7 +321,7 @@ pub fn users(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &mut
                     if !u.member_of.is_empty() {
                         parts.push(format!("member of {}", u.member_of.join(", ")));
                     }
-                    ui.add(egui::Label::new(RichText::new(parts.join(" · ")).color(Tokens::TEXT_WEAK)).truncate());
+                    ui.add(egui::Label::new(RichText::new(parts.join(" · ")).color(Tokens::text_weak())).truncate());
                 });
                 let r = row.response();
                 if r.clicked() {
@@ -344,7 +344,7 @@ pub fn users(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &mut
             .show(ui.ctx(), |ui| {
                 ui.label(format!("Delete `{}`{}? This cannot be undone.", name, host.as_ref().map(|h| format!("@{h}")).unwrap_or_default()));
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Delete").color(Tokens::ERROR)).clicked() {
+                    if ui.button(RichText::new("Delete").color(Tokens::error())).clicked() {
                         actions.push(Action::DeleteUser { connection: sel.connection.clone(), name: name.clone(), host: host.clone() });
                         view.confirm_delete_user = None;
                     }

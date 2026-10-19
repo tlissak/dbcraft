@@ -168,8 +168,8 @@ pub fn show(ctx: &egui::Context, form: &mut ConnectionForm) -> Outcome {
                 });
             } else if let Some(r) = &form.test_result {
                 match r {
-                    Ok(v) => ui.colored_label(Tokens::SUCCESS, format!("{} Connection Successful  ({v})", icons::CHECK)),
-                    Err(e) => ui.colored_label(Tokens::ERROR, format!("{} {e}", icons::X)),
+                    Ok(v) => ui.colored_label(Tokens::success(), format!("{} Connection Successful  ({v})", icons::CHECK)),
+                    Err(e) => ui.colored_label(Tokens::error(), format!("{} {e}", icons::X)),
                 };
             }
             ui.horizontal(|ui| {

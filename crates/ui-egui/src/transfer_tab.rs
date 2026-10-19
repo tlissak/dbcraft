@@ -157,7 +157,7 @@ pub fn show(ui: &mut Ui, idx: usize, form: &mut TransferForm, session: &Session,
             let running = form.job.running();
             let ready = form.params();
             let start =
-                ui.add_enabled(!running && ready.is_ok(), egui::Button::new(RichText::new(format!("{} Start", icons::PLAY)).strong().color(Tokens::SUCCESS)));
+                ui.add_enabled(!running && ready.is_ok(), egui::Button::new(RichText::new(format!("{} Start", icons::PLAY)).strong().color(Tokens::success())));
             if start.clicked() {
                 actions.push(Action::TransferStart(idx));
             }
@@ -168,7 +168,7 @@ pub fn show(ui: &mut Ui, idx: usize, form: &mut TransferForm, session: &Session,
                 ui.weak(why);
             }
             if let Some(s) = &form.status {
-                ui.colored_label(Tokens::ACCENT, s);
+                ui.colored_label(Tokens::accent(), s);
             }
         });
         ui.add_space(6.0);

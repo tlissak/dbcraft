@@ -71,15 +71,15 @@ pub fn show_log(ui: &mut egui::Ui, job: &Job, height: f32) {
             ui.label("Running…");
         }
         Some(Ok(_)) => {
-            ui.colored_label(crate::theme::Tokens::SUCCESS, format!("{} Finished", crate::icons::CHECK));
+            ui.colored_label(crate::theme::Tokens::success(), format!("{} Finished", crate::icons::CHECK));
         }
         Some(Err(e)) => {
-            ui.colored_label(crate::theme::Tokens::ERROR, format!("{} {e}", crate::icons::X));
+            ui.colored_label(crate::theme::Tokens::error(), format!("{} {e}", crate::icons::X));
         }
     });
     egui::Frame::new()
-        .fill(crate::theme::Tokens::PANEL_BG)
-        .stroke(egui::Stroke::new(1.0, crate::theme::Tokens::BORDER))
+        .fill(crate::theme::Tokens::panel_bg())
+        .stroke(egui::Stroke::new(1.0, crate::theme::Tokens::border()))
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             egui::ScrollArea::vertical().max_height(height).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {

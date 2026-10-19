@@ -8,6 +8,7 @@ mod commands;
 mod connection_cmds;
 mod data_cmds;
 mod export_cmds;
+mod options_cmds;
 mod params;
 mod query_cmds;
 mod saved_query_cmds;
@@ -30,6 +31,7 @@ use dbcraft_drivers::Connection;
 pub use dbcraft_drivers::users::{PrivilegeCatalog, catalog as privilege_catalog};
 pub use dbcraft_drivers::{Cancel, supported_kinds, with_cancel};
 use dbcraft_model::{DbObject, PasswordStorage, Workspace};
+pub use options_cmds::{check_format, page_size};
 use serde_json::Value as Json;
 
 /// What [`Session::dispatch`] returns.

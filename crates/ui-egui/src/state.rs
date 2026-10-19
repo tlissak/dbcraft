@@ -308,6 +308,8 @@ pub struct UiState {
     pub show_about: bool,
     /// Last error, shown in the status bar until the next action.
     pub status: Option<String>,
+    /// Tools › Options dialog (Some while open).
+    pub options_form: Option<crate::options_dialog::OptionsForm>,
 }
 
 impl Default for UiState {
@@ -323,6 +325,7 @@ impl Default for UiState {
             confirm_close: None,
             show_about: false,
             status: None,
+            options_form: None,
         }
     }
 }

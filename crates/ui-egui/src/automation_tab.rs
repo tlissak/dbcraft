@@ -237,14 +237,14 @@ pub fn show(ui: &mut Ui, idx: usize, view: &mut AutomationView, session: &Sessio
                 actions.push(Action::Automation(idx, AutoAct::Save));
             }
             let can_run = !job.steps.is_empty() && !view.job.running();
-            if ui.add_enabled(can_run, egui::Button::new(RichText::new(format!("{} Start", icons::PLAY)).color(Tokens::SUCCESS))).clicked() {
+            if ui.add_enabled(can_run, egui::Button::new(RichText::new(format!("{} Start", icons::PLAY)).color(Tokens::success()))).clicked() {
                 actions.push(Action::Automation(idx, AutoAct::Run));
             }
             if changed {
                 ui.weak("● unsaved changes");
             }
             if let Some(s) = &view.status {
-                ui.colored_label(Tokens::ACCENT, s);
+                ui.colored_label(Tokens::accent(), s);
             }
         });
         ui.add_space(6.0);

@@ -120,6 +120,8 @@ pub struct DbCraftApp {
     bg: Vec<(Task, Then)>,
     /// Actions waiting for a connection that is still opening.
     after_open: Vec<(String, Action)>,
+    /// Options the theme and display formats were last set from.
+    applied_options: Option<dbcraft_model::Options>,
     /// Tests: wait for each background task right after starting it, so a frame later its result
     /// is on screen (kittest doesn't run real time).
     wait_for_tasks: bool,
@@ -175,6 +177,7 @@ impl DbCraftApp {
             tree_started: false,
             bg: Vec::new(),
             after_open: Vec::new(),
+            applied_options: None,
             wait_for_tasks: false,
         }
     }
@@ -516,7 +519,7 @@ impl DbCraftApp {
         if i == 0 || i >= self.state.tabs.len() {
             return;
         }
-        if !force && matches!(self.state.tabs.get(i), Some(Tab::Query(q)) if q.dirty()) {
+        if !force && self.session.workspace.options.confirm_close && matches!(self.state.tabs.get(i), Some(Tab::Query(q)) if q.dirty()) {
             self.state.confirm_close = Some(i);
             self.state.active_tab = i;
             return;
@@ -828,7 +831,8 @@ impl DbCraftApp {
             self.state.active_tab = i;
             return;
         }
-        let tab = TableTab { connection, database: Some(database), schema, table, limit: dbcraft_engine::DEFAULT_PAGE, ..TableTab::default() };
+        let limit = dbcraft_engine::page_size(&self.session.workspace.options);
+        let tab = TableTab { connection, database: Some(database), schema, table, limit, ..TableTab::default() };
         self.state.tabs.push(Tab::Table(Box::new(tab)));
         self.state.active_tab = self.state.tabs.len() - 1;
         self.reload_table(self.state.active_tab);
@@ -878,6 +882,17 @@ impl DbCraftApp {
     fn spawn_bg(&mut self, steps: Vec<(&'static str, Json)>, then: Then) {
         let task = self.spawn_task(steps);
         self.bg.push((task, then));
+    }
+
+    /// Theme and display formats follow Tools › Options (set by the dialog, the CLI or an agent).
+    fn apply_options(&mut self, ctx: &egui::Context) {
+        let o = &self.session.workspace.options;
+        if self.applied_options.as_ref() == Some(o) {
+            return;
+        }
+        crate::theme::set_dark(ctx, o.theme == "dark");
+        crate::display::apply(o);
+        self.applied_options = Some(o.clone());
     }
 
     /// Something runs in the background (opening, loading, a tab's query or page).
@@ -1061,6 +1076,7 @@ impl DbCraftApp {
                 self.state.active_tab = 0;
             }
             "ui.about" => self.state.show_about = true,
+            "ui.options" => self.state.options_form = Some(crate::options_dialog::OptionsForm::new(self.session.workspace.options.clone())),
             "ui.toggleMessages" => self.new_query(None, None),
             "dialog.newConnection" => self.state.connection_form = Some(ConnectionForm::new(DbKind::Mysql)),
             "ui.objects.queries" => self.apply(ctx, vec![Action::SetObjectsMode(ObjectsMode::Queries)]),
@@ -1100,6 +1116,7 @@ impl DbCraftApp {
                 .as_ref()
                 .and_then(|s| s.database.as_ref().map(|d| Action::Command("database.tables", json!({ "connection": s.connection, "database": d })))),
             "tools.dataTransfer" => Some(Action::Ui("ui.transfer")),
+            "tools.options" => Some(Action::Ui("ui.options")),
             "backup.create" => Some(Action::Ui("ui.objects.backups")),
             "automation.save" => Some(Action::Ui("ui.automation")),
             "user.list" => Some(Action::Ui("ui.objects.users")),
@@ -1142,7 +1159,9 @@ impl DbCraftApp {
                     ui.separator();
                 }
                 let enabled = !action.is_empty();
-                let r = toolbar_button(ui, glyph, label, *color, enabled);
+                let o = &self.session.workspace.options;
+                let r = toolbar_button(ui, glyph, label, *color, enabled, o.big_icons, o.show_caption);
+                let r = if o.show_caption || !enabled { r } else { r.on_hover_text(*label) };
                 let r = if enabled { r } else { r.on_hover_text("Coming soon (ROADMAP.md)") };
                 if r.clicked() {
                     actions.push(Action::Ui(action));
@@ -1177,7 +1196,7 @@ impl DbCraftApp {
                     let (glyph, color) = icons::connection_glyph(cfg.kind, open);
                     let mut text = icon_job(glyph, color, 15.0, &cfg.name);
                     if cfg.ssh.is_some() {
-                        text.append(&format!("  {}", icons::LOCK_KEY), 0.0, egui::TextFormat { color: Tokens::TEXT_WEAK, ..Default::default() });
+                        text.append(&format!("  {}", icons::LOCK_KEY), 0.0, egui::TextFormat { color: Tokens::text_weak(), ..Default::default() });
                     }
                     ui.selectable_label(is_sel, text)
                 });
@@ -1326,11 +1345,11 @@ impl DbCraftApp {
             let qid = egui::Id::new(("grp", conn, db, "Queries"));
             let qh = CollapsingState::load_with_default_open(ui.ctx(), qid, false).show_header(ui, |ui| {
                 let is_sel = self.state.objects.mode == ObjectsMode::Queries && sel.is_some_and(|s| s.connection == conn && s.database.as_deref() == Some(db));
-                ui.selectable_label(is_sel, icon_job(icons::FILE_SQL, Tokens::ACCENT, 14.0, &format!("Queries ({})", queries.len())))
+                ui.selectable_label(is_sel, icon_job(icons::FILE_SQL, Tokens::accent(), 14.0, &format!("Queries ({})", queries.len())))
             });
             let (_, qresp, _) = qh.body(|ui| {
                 for q in queries {
-                    let r = ui.selectable_label(false, icon_job(icons::FILE_SQL, Tokens::ACCENT, 13.0, &q.name));
+                    let r = ui.selectable_label(false, icon_job(icons::FILE_SQL, Tokens::accent(), 13.0, &q.name));
                     if r.double_clicked() {
                         actions.push(Action::OpenSavedQuery(q.id.clone()));
                     }
@@ -1382,29 +1401,29 @@ impl DbCraftApp {
 
     fn tab_strip(&mut self, ui: &mut Ui, actions: &mut Vec<Action>) {
         let mut close = None;
-        egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 0 }).show(ui, |ui| {
+        egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 0 }).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 1.0;
                 for (i, t) in self.state.tabs.iter().enumerate() {
                     let (icon, title, dirty) = match t {
-                        Tab::Objects => (RichText::new(egui_phosphor::regular::SQUARES_FOUR).color(Tokens::ACCENT), "Objects".to_string(), false),
+                        Tab::Objects => (RichText::new(egui_phosphor::regular::SQUARES_FOUR).color(Tokens::accent()), "Objects".to_string(), false),
                         Tab::Table(tt) => (icons::object(ObjectKind::Table), tt.title(), tt.dirty()),
-                        Tab::Query(q) => (RichText::new(icons::FILE_SQL).color(Tokens::ACCENT), q.title.clone(), q.dirty()),
+                        Tab::Query(q) => (RichText::new(icons::FILE_SQL).color(Tokens::accent()), q.title.clone(), q.dirty()),
                         Tab::Console(c) => {
                             let name = self.session.workspace.connection(&c.connection).map(|x| x.name.clone()).unwrap_or_default();
-                            (RichText::new(egui_phosphor::regular::TERMINAL_WINDOW).color(Tokens::TEXT), format!("Console - {name}"), false)
+                            (RichText::new(egui_phosphor::regular::TERMINAL_WINDOW).color(Tokens::text()), format!("Console - {name}"), false)
                         }
-                        Tab::Transfer(_) => (RichText::new(egui_phosphor::regular::ARROWS_LEFT_RIGHT).color(Tokens::ACCENT), "Data Transfer".into(), false),
+                        Tab::Transfer(_) => (RichText::new(egui_phosphor::regular::ARROWS_LEFT_RIGHT).color(Tokens::accent()), "Data Transfer".into(), false),
                         Tab::Automation(_) => {
                             (RichText::new(egui_phosphor::regular::ROBOT).color(egui::Color32::from_rgb(0xd4, 0x8a, 0x17)), "Automation".into(), false)
                         }
-                        Tab::User(u) => (RichText::new(egui_phosphor::regular::USER).color(Tokens::TEXT), u.title(), false),
+                        Tab::User(u) => (RichText::new(egui_phosphor::regular::USER).color(Tokens::text()), u.title(), false),
                     };
                     let active = i == self.state.active_tab;
-                    let fill = if active { Tokens::BG } else { Tokens::TAB_INACTIVE };
+                    let fill = if active { Tokens::bg() } else { Tokens::tab_inactive() };
                     egui::Frame::new()
                         .fill(fill)
-                        .stroke(egui::Stroke::new(1.0, Tokens::BORDER))
+                        .stroke(egui::Stroke::new(1.0, Tokens::border()))
                         .corner_radius(egui::CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 })
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
@@ -1465,16 +1484,22 @@ fn tab_task(t: &Tab) -> Option<&Task> {
 }
 
 /// A Navicat-style toolbar button: large tinted icon above a small label, sized to its label.
-fn toolbar_button(ui: &mut Ui, glyph: &str, label: &str, color: egui::Color32, enabled: bool) -> egui::Response {
-    let icon_font = egui::FontId::proportional(24.0);
+/// `big`: Navicat's "Use Big Icons"; `caption`: "Show Caption" (the label under the icon).
+fn toolbar_button(ui: &mut Ui, glyph: &str, label: &str, color: egui::Color32, enabled: bool, big: bool, caption: bool) -> egui::Response {
+    let icon_font = egui::FontId::proportional(if big { 24.0 } else { 16.0 });
     let label_font = egui::FontId::proportional(12.0);
-    let (icon_color, text_color) = if enabled { (color, Tokens::TEXT) } else { (Tokens::CLOSED, Tokens::TEXT_WEAK) };
+    let (icon_color, text_color) = if enabled { (color, Tokens::text()) } else { (Tokens::closed(), Tokens::text_weak()) };
     let icon = ui.painter().layout_no_wrap(glyph.to_string(), icon_font, icon_color);
-    let text = ui.painter().layout_no_wrap(label.to_string(), label_font, text_color);
-    let size = egui::vec2(text.size().x.max(icon.size().x).max(44.0) + 14.0, 54.0);
+    let text = ui.painter().layout_no_wrap(if caption { label.to_string() } else { String::new() }, label_font, text_color);
+    let size = match (big, caption) {
+        (true, true) => egui::vec2(text.size().x.max(icon.size().x).max(44.0) + 14.0, 54.0),
+        (false, true) => egui::vec2(text.size().x.max(icon.size().x).max(36.0) + 12.0, 40.0),
+        (true, false) => egui::vec2(40.0, 38.0),
+        (false, false) => egui::vec2(28.0, 28.0),
+    };
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     if enabled && resp.hovered() {
-        ui.painter().rect(rect, 4.0, Tokens::HOVER, egui::Stroke::new(1.0, Tokens::SELECTION_STROKE), egui::StrokeKind::Inside);
+        ui.painter().rect(rect, 4.0, Tokens::hover(), egui::Stroke::new(1.0, Tokens::selection_stroke()), egui::StrokeKind::Inside);
     }
     let icon_pos = egui::pos2(rect.center().x - icon.size().x / 2.0, rect.top() + 5.0);
     let text_pos = egui::pos2(rect.center().x - text.size().x / 2.0, rect.bottom() - text.size().y - 4.0);
@@ -1490,7 +1515,7 @@ fn icon_job(glyph: &str, color: egui::Color32, size: f32, label: &str) -> egui::
     job.append(
         &format!("  {label}"),
         0.0,
-        egui::TextFormat { color: Tokens::TEXT, font_id: egui::FontId::proportional(13.0), valign: egui::Align::Center, ..Default::default() },
+        egui::TextFormat { color: Tokens::text(), font_id: egui::FontId::proportional(13.0), valign: egui::Align::Center, ..Default::default() },
     );
     job
 }
@@ -1503,22 +1528,23 @@ impl eframe::App for DbCraftApp {
             self.themed = true;
         }
         self.ctx_for_jobs = ctx.clone();
+        self.apply_options(ctx);
         self.poll_jobs();
         self.poll_tasks(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {
             self.stop();
         }
         let mut actions = std::mem::take(&mut self.startup);
-        egui::Panel::top("menu").frame(egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 2))).show(root, |ui| {
+        egui::Panel::top("menu").frame(egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 2))).show(root, |ui| {
             self.menu_bar(ui, &mut actions);
             ui.add_space(2.0);
             self.toolbar(ui, &mut actions);
             ui.add_space(2.0);
         });
-        egui::Panel::bottom("status").frame(egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(8, 3))).show(root, |ui| {
+        egui::Panel::bottom("status").frame(egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(8, 3))).show(root, |ui| {
             ui.horizontal(|ui| match &self.state.status {
                 Some(e) => {
-                    ui.colored_label(Tokens::ERROR, format!("{} {e}", icons::X));
+                    ui.colored_label(Tokens::error(), format!("{} {e}", icons::X));
                 }
                 None => {
                     let open = self.session.workspace.connections.iter().filter(|c| self.session.is_open(&c.id)).count();
@@ -1540,10 +1566,10 @@ impl eframe::App for DbCraftApp {
             egui::Panel::left("navigation")
                 .resizable(true)
                 .default_size(270.0)
-                .frame(egui::Frame::new().fill(Tokens::PANEL_BG).inner_margin(egui::Margin::same(4)))
+                .frame(egui::Frame::new().fill(Tokens::panel_bg()).inner_margin(egui::Margin::same(4)))
                 .show(root, |ui| self.navigation(ui, &mut actions));
         }
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Tokens::BG)).show(root, |ui| self.central(ui, &mut actions));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Tokens::bg())).show(root, |ui| self.central(ui, &mut actions));
 
         if let Some(form) = &mut self.state.connection_form {
             match conn_dialog::show(ctx, form) {
@@ -1558,6 +1584,19 @@ impl eframe::App for DbCraftApp {
                         }
                         self.tried.retain(|k| !k.contains(&id));
                         self.state.connection_form = None;
+                    }
+                }
+            }
+        }
+        if let Some(form) = &mut self.state.options_form {
+            match crate::options_dialog::show(ctx, form) {
+                crate::options_dialog::Outcome::Open => {}
+                crate::options_dialog::Outcome::Cancel => self.state.options_form = None,
+                crate::options_dialog::Outcome::Save(o) => {
+                    let set = serde_json::to_value(&o).unwrap_or_default();
+                    match self.session.dispatch("tools.options", &json!({ "set": set })) {
+                        Ok(_) => self.state.options_form = None,
+                        Err(e) => form.error = Some(e.to_string()),
                     }
                 }
             }

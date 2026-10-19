@@ -33,9 +33,9 @@ pub fn complete(pending: &str, input: &str) -> bool {
 pub fn show(ui: &mut Ui, idx: usize, tab: &mut ConsoleTab, session: &Session, actions: &mut Vec<Action>) {
     let cfg = session.workspace.connection(&tab.connection).ok();
     let kind = cfg.map(|c| c.kind);
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(egui_phosphor::regular::TERMINAL_WINDOW).color(Tokens::ACCENT));
+            ui.label(RichText::new(egui_phosphor::regular::TERMINAL_WINDOW).color(Tokens::accent()));
             ui.strong(cfg.map(|c| c.name.as_str()).unwrap_or("?"));
             ui.weak(format!("database: {}", tab.database.as_deref().unwrap_or("(default)")));
             if ui.button("Clear").clicked() {

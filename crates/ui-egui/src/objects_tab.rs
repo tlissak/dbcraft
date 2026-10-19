@@ -59,7 +59,7 @@ pub fn show(ui: &mut Ui, session: &Session, sel: Option<&Selection>, view: &mut 
 
     // Sub-toolbar.
     let group_word = if sel.group == ObjectKind::View { "View" } else { "Table" };
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
             let can_open = selected_info.is_some();
             if ui.add_enabled(can_open, egui::Button::new(format!("{} Open {group_word}", icons::TABLE))).clicked()
@@ -220,7 +220,7 @@ fn info_pane(ui: &mut Ui, kind: DbKind, t: Option<&TableInfo>, view: &mut Object
     egui::Grid::new("info_general").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         let mut row = |k: &str, v: Option<String>| {
             if let Some(v) = v {
-                ui.label(RichText::new(k).color(Tokens::TEXT_WEAK));
+                ui.label(RichText::new(k).color(Tokens::text_weak()));
                 ui.label(v);
                 ui.end_row();
             }
@@ -253,7 +253,7 @@ fn connection_summary(ui: &mut Ui, session: &Session, sel: &Selection) {
     egui::Grid::new("conn_summary").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
         let mut row = |k: &str, v: String| {
             if !v.is_empty() {
-                ui.label(RichText::new(k).color(Tokens::TEXT_WEAK));
+                ui.label(RichText::new(k).color(Tokens::text_weak()));
                 ui.label(v);
                 ui.end_row();
             }

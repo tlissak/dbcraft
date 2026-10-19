@@ -12,16 +12,16 @@ use crate::theme::Tokens;
 
 pub fn show(ui: &mut Ui, idx: usize, tab: &mut UserTab, session: &Session, users: &[UserInfo], actions: &mut Vec<Action>) {
     let Some(kind) = session.workspace.connection(&tab.connection).ok().map(|c| c.kind) else {
-        ui.colored_label(Tokens::ERROR, "Connection not found.");
+        ui.colored_label(Tokens::error(), "Connection not found.");
         return;
     };
     let Ok(cat) = dbcraft_engine::privilege_catalog(kind) else {
-        ui.colored_label(Tokens::ERROR, format!("User management is not available for {}.", kind.label()));
+        ui.colored_label(Tokens::error(), format!("User management is not available for {}.", kind.label()));
         return;
     };
     let mysql = matches!(kind, DbKind::Mysql | DbKind::Mariadb);
 
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
             if ui.button(RichText::new(format!("{} Save", ph::FLOPPY_DISK)).strong()).clicked() {
                 actions.push(Action::UserSave(idx));
@@ -42,12 +42,12 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut UserTab, session: &Session, users
                 }
             }
             if tab.saved {
-                ui.colored_label(Tokens::SUCCESS, format!("{} Saved", icons::CHECK));
+                ui.colored_label(Tokens::success(), format!("{} Saved", icons::CHECK));
             }
         });
     });
     if let Some(e) = &tab.error {
-        ui.colored_label(Tokens::ERROR, format!("{} {e}", icons::X));
+        ui.colored_label(Tokens::error(), format!("{} {e}", icons::X));
     }
     ui.add_space(6.0);
     let u = &mut tab.user;
@@ -111,7 +111,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut UserTab, session: &Session, users
                     ui.end_row();
                     if !tab.password.is_empty() && tab.password != tab.confirm {
                         ui.label("");
-                        ui.colored_label(Tokens::ERROR, "Passwords do not match");
+                        ui.colored_label(Tokens::error(), "Passwords do not match");
                         ui.end_row();
                     }
                 }
@@ -193,7 +193,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut UserTab, session: &Session, users
             let mut remove = None;
             for (i, g) in u.grants.iter_mut().enumerate().filter(|(_, g)| g.object != "*.*") {
                 ui.add_space(4.0);
-                egui::Frame::new().stroke(egui::Stroke::new(1.0, Tokens::BORDER)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
+                egui::Frame::new().stroke(egui::Stroke::new(1.0, Tokens::border())).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong(format!("{}  {}", ph::TABLE, g.object));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

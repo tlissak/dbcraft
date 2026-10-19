@@ -5,12 +5,14 @@ pub(crate) mod app;
 mod automation_tab;
 mod conn_dialog;
 mod console_tab;
+pub mod display;
 pub mod grid;
 pub mod icons;
 pub mod jobs;
 pub mod menu_catalog;
 mod objects_modes;
 mod objects_tab;
+pub mod options_dialog;
 mod query_tab;
 pub mod state;
 mod table_tab;
@@ -23,7 +25,7 @@ pub use app::{DbCraftApp, StartupAction};
 
 /// Shell-only commands (view/window state, no engine involvement).
 pub const UI_COMMANDS: &[&str] =
-    &["ui.newQuery", "ui.console", "ui.exit", "ui.toggleNavigation", "ui.toggleInfo", "ui.toggleMessages", "ui.closeAllTabs", "ui.about"];
+    &["ui.newQuery", "ui.console", "ui.exit", "ui.toggleNavigation", "ui.toggleInfo", "ui.toggleMessages", "ui.closeAllTabs", "ui.about", "ui.options"];
 
 /// Ids of every registered engine command.
 pub fn engine_command_ids() -> Vec<&'static str> {
@@ -38,7 +40,7 @@ pub fn parity() -> (usize, usize) {
 }
 
 /// Raise when parity rises; never lower it.
-pub const PARITY_FLOOR: usize = 19;
+pub const PARITY_FLOOR: usize = 20;
 
 #[cfg(test)]
 mod tests {

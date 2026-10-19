@@ -23,7 +23,7 @@ pub fn engine_color(kind: DbKind) -> Color32 {
 
 /// Connection node icon: a database glyph in the engine colour when open, grey when closed.
 pub fn connection_glyph(kind: DbKind, open: bool) -> (&'static str, Color32) {
-    if open { (ph::PLUGS_CONNECTED, engine_color(kind)) } else { (ph::DATABASE, Tokens::CLOSED) }
+    if open { (ph::PLUGS_CONNECTED, engine_color(kind)) } else { (ph::DATABASE, Tokens::closed()) }
 }
 
 pub fn connection(kind: DbKind, open: bool) -> RichText {
@@ -33,7 +33,7 @@ pub fn connection(kind: DbKind, open: bool) -> RichText {
 
 /// Database node: green once its objects are loaded, grey before.
 pub fn database_glyph(open: bool) -> (&'static str, Color32) {
-    (ph::DATABASE, if open { Color32::from_rgb(0x2e, 0x9e, 0x5b) } else { Tokens::CLOSED })
+    (ph::DATABASE, if open { Color32::from_rgb(0x2e, 0x9e, 0x5b) } else { Tokens::closed() })
 }
 
 pub fn object(kind: ObjectKind) -> RichText {

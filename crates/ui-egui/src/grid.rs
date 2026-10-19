@@ -194,12 +194,12 @@ pub fn keyboard(ui: &Ui, rs: &ResultSet, sel: &mut GridSel) -> bool {
 pub fn paint_cell(ui: &Ui, sel: &GridSel, r: usize, c: usize, base: Option<egui::Color32>) {
     let rect = ui.max_rect();
     if sel.contains(r, c) {
-        ui.painter().rect_filled(rect, 0.0, Tokens::SELECTION);
+        ui.painter().rect_filled(rect, 0.0, Tokens::selection());
     } else if let Some(bg) = base {
         ui.painter().rect_filled(rect, 0.0, bg);
     }
     if sel.focus() == Some((r, c)) && matches!(sel, GridSel::Cells { .. }) {
-        ui.painter().rect_stroke(rect.shrink(0.5), 0.0, egui::Stroke::new(1.5, Tokens::ACCENT), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(rect.shrink(0.5), 0.0, egui::Stroke::new(1.5, Tokens::accent()), egui::StrokeKind::Inside);
     }
 }
 
@@ -207,10 +207,10 @@ pub fn paint_cell(ui: &Ui, sel: &GridSel, r: usize, c: usize, base: Option<egui:
 pub fn row_header(ui: &mut Ui, label: &str, r: usize, sel: &mut GridSel) -> egui::Response {
     let rect = ui.max_rect();
     let full = sel.row_fully_selected(r);
-    ui.painter().rect_filled(rect, 0.0, if full { Tokens::SELECTION_STROKE } else { Tokens::GRID_HEADER });
+    ui.painter().rect_filled(rect, 0.0, if full { Tokens::selection_stroke() } else { Tokens::grid_header() });
     let resp = ui.allocate_rect(rect, egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Row {label}")));
-    ui.painter().text(rect.right_center() - egui::vec2(4.0, 0.0), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.0), Tokens::TEXT_WEAK);
+    ui.painter().text(rect.right_center() - egui::vec2(4.0, 0.0), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.0), Tokens::text_weak());
     if resp.clicked() {
         let m = ui.input(|i| i.modifiers);
         sel.click_row(r, m);
@@ -238,7 +238,7 @@ pub fn result_grid(ui: &mut Ui, id: egui::Id, rs: &ResultSet, sel: &mut GridSel,
                 h.col(|ui| {
                     // Corner: select all.
                     let rect = ui.max_rect();
-                    ui.painter().rect_filled(rect, 0.0, Tokens::GRID_HEADER);
+                    ui.painter().rect_filled(rect, 0.0, Tokens::grid_header());
                     if ui.allocate_rect(rect, egui::Sense::click()).on_hover_text("Select All (Ctrl+A)").clicked() {
                         *sel = GridSel::All;
                     }
@@ -246,7 +246,7 @@ pub fn result_grid(ui: &mut Ui, id: egui::Id, rs: &ResultSet, sel: &mut GridSel,
                 for (c, col) in rs.columns.iter().enumerate() {
                     h.col(|ui| {
                         let rect = ui.max_rect();
-                        ui.painter().rect_filled(rect, 0.0, if sel.col_fully_selected(c) { Tokens::SELECTION_STROKE } else { Tokens::GRID_HEADER });
+                        ui.painter().rect_filled(rect, 0.0, if sel.col_fully_selected(c) { Tokens::selection_stroke() } else { Tokens::grid_header() });
                         let r = ui.add(egui::Label::new(RichText::new(&col.name).strong()).truncate().sense(egui::Sense::click()));
                         let r = r.on_hover_text(&col.type_name);
                         if r.clicked() {
@@ -266,8 +266,8 @@ pub fn result_grid(ui: &mut Ui, id: egui::Id, rs: &ResultSet, sel: &mut GridSel,
                     for (c, v) in cells.iter().enumerate() {
                         row.col(|ui| {
                             paint_cell(ui, sel, r, c, None);
-                            let text =
-                                if matches!(v, Value::Null) { RichText::new("(NULL)").color(Tokens::TEXT_WEAK).italics() } else { RichText::new(v.display()) };
+                            let (shown, weak) = crate::display::cell(v, rs.columns.get(c).map_or("", |col| col.type_name.as_str()));
+                            let text = if weak { RichText::new(shown).color(Tokens::text_weak()).italics() } else { RichText::new(shown) };
                             let resp = ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click()));
                             if resp.clicked() {
                                 let m = ui.input(|i| i.modifiers);

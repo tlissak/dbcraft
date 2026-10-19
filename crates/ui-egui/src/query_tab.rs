@@ -22,7 +22,7 @@ pub fn dialect_of(session: &Session, conn: Option<&str>) -> Dialect {
 
 pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, String)], session: &Session, actions: &mut Vec<Action>) {
     let dbs = tab.connection.as_ref().and_then(|c| session.databases.get(c)).cloned().unwrap_or_default();
-    egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+    egui::Frame::new().fill(Tokens::toolbar_bg()).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
         ui.horizontal(|ui| {
             let save = ui.button(format!("{} Save", ph::FLOPPY_DISK)).on_hover_text("Save (Ctrl+S)").clicked()
                 || ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
@@ -47,7 +47,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, Strin
             });
             let idle = tab.task.is_none();
             let run = ui
-                .add_enabled(tab.connection.is_some() && idle, egui::Button::new(RichText::new(format!("{} Run", icons::PLAY)).color(Tokens::SUCCESS)))
+                .add_enabled(tab.connection.is_some() && idle, egui::Button::new(RichText::new(format!("{} Run", icons::PLAY)).color(Tokens::success())))
                 .on_hover_text("Run (Ctrl+R)")
                 .clicked()
                 || ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R));
@@ -75,7 +75,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, Strin
                 }
             }
             let msg = tab.results.len();
-            let text = if tab.error.is_some() { RichText::new("Message").color(Tokens::ERROR) } else { RichText::new("Message") };
+            let text = if tab.error.is_some() { RichText::new("Message").color(Tokens::error()) } else { RichText::new("Message") };
             if ui.add(egui::Button::selectable(tab.result_idx >= msg, text)).clicked() {
                 tab.result_idx = msg;
             }
@@ -94,7 +94,7 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, Strin
             None => {
                 egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
                     if let Some(e) = &tab.error {
-                        ui.colored_label(Tokens::ERROR, e);
+                        ui.colored_label(Tokens::error(), e);
                         ui.separator();
                     }
                     for m in &tab.messages {
@@ -109,8 +109,27 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, Strin
         }
     });
 
-    egui::ScrollArea::vertical().id_salt(("qedit", idx)).show(ui, |ui| {
-        ui.add(egui::TextEdit::multiline(&mut tab.sql).code_editor().desired_width(f32::INFINITY).desired_rows(18).hint_text("SELECT * FROM …"));
+    // Tools › Options › Editor: font size and word wrap.
+    let (size, wrap) = (session.workspace.options.editor_font_size, session.workspace.options.word_wrap);
+    let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap_width: f32| {
+        let job = egui::text::LayoutJob::simple(
+            text.as_str().to_string(),
+            egui::FontId::monospace(size),
+            ui.visuals().override_text_color.unwrap_or_else(Tokens::text),
+            if wrap { wrap_width } else { f32::INFINITY },
+        );
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    let scroll = if wrap { egui::ScrollArea::vertical() } else { egui::ScrollArea::both() };
+    scroll.id_salt(("qedit", idx)).show(ui, |ui| {
+        ui.add(
+            egui::TextEdit::multiline(&mut tab.sql)
+                .code_editor()
+                .layouter(&mut layouter)
+                .desired_width(f32::INFINITY)
+                .desired_rows(18)
+                .hint_text("SELECT * FROM …"),
+        );
     });
 
     // Save As prompt.
