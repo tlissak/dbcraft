@@ -30,6 +30,8 @@ pub struct Palette {
     pub error: Color32,
     pub success: Color32,
     pub closed: Color32,
+    /// Resting fill of buttons, fields, check boxes (they have no border at rest; see `visuals`).
+    pub control: Color32,
     pub dark: bool,
 }
 
@@ -53,6 +55,7 @@ pub const LIGHT: Palette = Palette {
     error: Color32::from_rgb(0xc6, 0x28, 0x28),
     success: Color32::from_rgb(0x2e, 0x7d, 0x32),
     closed: Color32::from_rgb(0xa0, 0xa4, 0xa8),
+    control: Color32::from_rgb(0xee, 0xf0, 0xf3),
     dark: false,
 };
 
@@ -77,6 +80,7 @@ pub const DARK: Palette = Palette {
     error: Color32::from_rgb(0xef, 0x6b, 0x6b),
     success: Color32::from_rgb(0x5c, 0xc4, 0x6a),
     closed: Color32::from_rgb(0x6f, 0x73, 0x78),
+    control: Color32::from_rgb(0x33, 0x36, 0x3a),
     dark: true,
 };
 
@@ -114,6 +118,7 @@ tokens!(
     stripe,
     grid_header,
     tab_inactive,
+    control,
     edited,
     inserted,
     deleted,
@@ -187,9 +192,13 @@ fn visuals() -> Visuals {
     let r = CornerRadius::same(3);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.noninteractive.corner_radius = r;
-    v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-    v.widgets.inactive.bg_fill = p.bg;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
+    // No border at rest, a fill instead: egui sizes a frameless button's resting state without a
+    // border, so a resting border wider than zero makes buttons grow 2 px on hover and push their
+    // neighbours. Hover and press show a border that egui fits inside the same size.
+    v.widgets.inactive.weak_bg_fill = p.control;
+    v.widgets.inactive.bg_fill = p.control;
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.text_edit_bg_color = Some(p.control);
     v.widgets.inactive.corner_radius = r;
     v.widgets.hovered.weak_bg_fill = p.hover;
     v.widgets.hovered.bg_fill = p.hover;

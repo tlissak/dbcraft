@@ -113,3 +113,33 @@ fn the_dialog_keeps_its_size() {
     h.run();
     assert_eq!(h.state().state.options_form.as_ref().map(|f| f.page), Some(dbcraft_ui_egui::options_dialog::OptionsPage::Editor));
 }
+
+/// Regression (owner report): hovering a button added a border that grew it and pushed its
+/// neighbours. Framed and frameless buttons must keep their size on hover.
+#[test]
+fn hover_never_moves_neighbours() {
+    let (_d, s) = setup("hover");
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
+    app.startup(StartupAction::NewQuery { connection: "lite".into(), database: Some("main".into()), sql: String::new() });
+    let mut h = harness(app);
+    h.run();
+    // Framed button: Save, its neighbour Save As.
+    let before = h.get_by_label("Save As").rect();
+    h.get_by_label(&format!("{} Save", egui_phosphor::regular::FLOPPY_DISK)).hover();
+    h.run();
+    assert_eq!(h.get_by_label("Save As").rect(), before, "framed button");
+    // Frameless selectable buttons: the Designer's page strip.
+    h.state_mut().state.tabs.push(Tab::Designer(Box::new(dbcraft_ui_egui::designer_tab::DesignerTab::new_table(
+        "lite".into(),
+        Some("main".into()),
+        None,
+        dbcraft_sql::Dialect::Sqlite,
+    ))));
+    let last = h.state().state.tabs.len() - 1;
+    h.state_mut().state.active_tab = last;
+    h.run();
+    let before = h.get_by_label("Foreign Keys").rect();
+    h.get_by_label("Indexes").hover();
+    h.run();
+    assert_eq!(h.get_by_label("Foreign Keys").rect(), before, "frameless button");
+}
