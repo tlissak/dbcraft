@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo, Value};
@@ -9,14 +10,19 @@ use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::{Decimal, JsonValue, Uuid};
 use sqlx::{AssertSqlSafe, Row};
 
-use crate::common::{CONNECT_TIMEOUT, block_on, cell_bool, cell_str, cell_u64, columns_of, db_err, decode_row, probe, returns_rows, run_atomic};
+use crate::common::{
+    CONNECT_TIMEOUT, block_on, cell_bool, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, returns_rows, run_atomic, spawn,
+};
+
+/// Connections per database pool: a query tab, a table tab and the tree can work at once.
+const POOL_SIZE: u32 = 4;
 
 /// PostgreSQL scopes a connection to one database, so we keep one small pool per database the
 /// user has expanded in the tree.
 pub struct PgConn {
     base: PgConnectOptions,
     default_db: String,
-    pools: HashMap<String, PgPool>,
+    pools: Mutex<HashMap<String, PgPool>>,
 }
 
 impl PgConn {
@@ -29,20 +35,21 @@ impl PgConn {
             base = base.password(pw);
         }
         let default_db = if cfg.database.is_empty() { "postgres".to_string() } else { cfg.database.clone() };
-        let mut conn = PgConn { base, default_db: default_db.clone(), pools: HashMap::new() };
+        let conn = PgConn { base, default_db: default_db.clone(), pools: Mutex::new(HashMap::new()) };
         conn.pool(&default_db)?;
         Ok(conn)
     }
 
-    fn pool(&mut self, db: &str) -> Result<PgPool> {
-        if let Some(p) = self.pools.get(db) {
+    fn pool(&self, db: &str) -> Result<PgPool> {
+        if let Some(p) = self.pools.lock().unwrap_or_else(PoisonError::into_inner).get(db) {
             return Ok(p.clone());
         }
+        // Connect without holding the lock (it can take seconds); a concurrent caller may build a
+        // second pool for the same database, and the first one stored wins.
         let opts = self.base.clone().database(db);
         probe::<sqlx::PgConnection>(&opts)?;
-        let pool = block_on(PgPoolOptions::new().max_connections(2).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
-        self.pools.insert(db.to_string(), pool.clone());
-        Ok(pool)
+        let pool = block_on(PgPoolOptions::new().max_connections(POOL_SIZE).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
+        Ok(self.pools.lock().unwrap_or_else(PoisonError::into_inner).entry(db.to_string()).or_insert(pool).clone())
     }
 }
 
@@ -55,19 +62,19 @@ impl crate::Connection for PgConn {
         Dialect::Postgres
     }
 
-    fn server_version(&mut self) -> Result<String> {
+    fn server_version(&self) -> Result<String> {
         let pool = self.pool(&self.default_db.clone())?;
         let row = block_on(sqlx::query("select version()").fetch_one(&pool))?.map_err(db_err)?;
         row.try_get::<String, _>(0).map_err(db_err)
     }
 
-    fn list_databases(&mut self) -> Result<Vec<String>> {
+    fn list_databases(&self) -> Result<Vec<String>> {
         let pool = self.pool(&self.default_db.clone())?;
         let rows = block_on(sqlx::query("select datname from pg_database where not datistemplate order by 1").fetch_all(&pool))?.map_err(db_err)?;
         rows.iter().map(|r| r.try_get::<String, _>(0).map_err(db_err)).collect()
     }
 
-    fn list_objects(&mut self, database: &str) -> Result<Vec<DbObject>> {
+    fn list_objects(&self, database: &str) -> Result<Vec<DbObject>> {
         let pool = self.pool(database)?;
         let sql = "select case table_type when 'VIEW' then 'view' else 'table' end, table_name, table_schema \
                    from information_schema.tables where table_schema not in ('pg_catalog','information_schema') \
@@ -92,7 +99,7 @@ impl crate::Connection for PgConn {
         Ok(out)
     }
 
-    fn table_info(&mut self, database: &str) -> Result<Vec<TableInfo>> {
+    fn table_info(&self, database: &str) -> Result<Vec<TableInfo>> {
         let sql = "select c.relname::text, n.nspname::text, case when c.relkind in ('v','m') then 'view' else 'table' end, \
                    coalesce(case when c.reltuples >= 0 then c.reltuples::bigint end, s.n_live_tup), \
                    case when c.relkind in ('r','p','m') then pg_total_relation_size(c.oid) end, \
@@ -118,7 +125,7 @@ impl crate::Connection for PgConn {
             .collect())
     }
 
-    fn table_ddl(&mut self, database: &str, schema: Option<&str>, table: &str) -> Result<String> {
+    fn table_ddl(&self, database: &str, schema: Option<&str>, table: &str) -> Result<String> {
         let qualified = qualified(schema, table);
         let reg = format!("to_regclass({})", quote_literal(Dialect::Postgres, &qualified));
         let kind = self.query(Some(database), &format!("select relkind::text from pg_class where oid = {reg}"))?;
@@ -177,13 +184,13 @@ impl crate::Connection for PgConn {
         Ok(ddl)
     }
 
-    fn execute_atomic(&mut self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
+    fn execute_atomic(&self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
         let pool = self.pool(&database.map(str::to_string).unwrap_or_else(|| self.default_db.clone()))?;
         let stmts = stmts.to_vec();
         block_on(async move { run_atomic!(pool.begin().await.map_err(db_err)?, stmts) })?
     }
 
-    fn columns(&mut self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+    fn columns(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         let reg = format!("to_regclass({})", quote_literal(Dialect::Postgres, &qualified(schema, table)));
         let rs = self.query(
             database,
@@ -210,7 +217,7 @@ impl crate::Connection for PgConn {
             .collect())
     }
 
-    fn primary_key(&mut self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<String>> {
+    fn primary_key(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<String>> {
         let reg = format!("to_regclass({})", quote_literal(Dialect::Postgres, &qualified(schema, table)));
         let rs = self.query(
             database,
@@ -222,12 +229,39 @@ impl crate::Connection for PgConn {
         Ok((0..rs.rows.len()).filter_map(|i| cell_str(&rs, i, 0)).collect())
     }
 
-    fn query(&mut self, database: Option<&str>, sql: &str) -> Result<ResultSet> {
-        let pool = self.pool(&database.map(str::to_string).unwrap_or_else(|| self.default_db.clone()))?;
+    fn query(&self, database: Option<&str>, sql: &str) -> Result<ResultSet> {
+        let db = database.map(str::to_string).unwrap_or_else(|| self.default_db.clone());
+        let pool = self.pool(&db)?;
         let start = Instant::now();
         let mut rs = ResultSet::default();
-        if returns_rows(sql) {
-            let rows = block_on(sqlx::query(AssertSqlSafe(sql.to_string())).fetch_all(&pool))?.map_err(db_err)?;
+        let cancellable = current_cancel().is_some();
+        let wants_rows = returns_rows(sql);
+        let sql = sql.to_string();
+        let kill_opts = self.base.clone().database(&db);
+        let (rows, affected) = block_on(async move {
+            let mut conn = pool.acquire().await?;
+            // With a Stop button, remember the backend so Stop can cancel the statement server-side.
+            let _kill = if cancellable {
+                let pid: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut *conn).await?;
+                Some(on_cancel(move || {
+                    spawn(async move {
+                        if let Ok(mut c) = <sqlx::PgConnection as sqlx::Connection>::connect_with(&kill_opts).await {
+                            let _ = sqlx::query("select pg_cancel_backend($1)").bind(pid).execute(&mut c).await;
+                            let _ = sqlx::Connection::close(c).await;
+                        }
+                    })
+                }))
+            } else {
+                None
+            };
+            if wants_rows {
+                Ok::<_, sqlx::Error>((sqlx::query(AssertSqlSafe(sql)).fetch_all(&mut *conn).await?, 0))
+            } else {
+                Ok((Vec::new(), sqlx::raw_sql(AssertSqlSafe(sql)).execute(&mut *conn).await?.rows_affected()))
+            }
+        })?
+        .map_err(db_err)?;
+        if wants_rows {
             if let Some(first) = rows.first() {
                 rs.columns = columns_of!(first);
             }
@@ -254,7 +288,7 @@ impl crate::Connection for PgConn {
                 })
                 .collect();
         } else {
-            rs.rows_affected = block_on(sqlx::raw_sql(AssertSqlSafe(sql.to_string())).execute(&pool))?.map_err(db_err)?.rows_affected();
+            rs.rows_affected = affected;
         }
         rs.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(rs)

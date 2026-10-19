@@ -2,9 +2,9 @@
 
 Every Navicat Premium 16 feature, ordered by priority, with its status in DbCraft. The feature list comes from the Navicat user manual: see [`docs/navicat-reference.md`](docs/navicat-reference.md) for what each feature should do. This is the single work list: pick from the top, and when you finish an item, flip its status and add the date.
 
-**Status:** ✅ done · 🟡 partial (what's missing is noted) · ⬜ not started · 🚫 not planned
+**Status:** ✅ done · 🟡 partial (what's missing is noted) · ⬜ not started · 🚫 not planned · ➡️ moved
 
-_Last updated: 2026-10-14 (second pass: grid, saved queries, Data Transfer, Console, Backup, Automation, Users)._
+_Last updated: 2026-10-19 (owner: Backup, Data Transfer and Structure Synchronization are prioritised tools (P1); the Table Designer moves to P3; tabs are not restored on startup)._
 
 ---
 
@@ -30,12 +30,20 @@ _Last updated: 2026-10-14 (second pass: grid, saved queries, Data Transfer, Cons
 
 | # | Feature | Status | Notes |
 |---|---|---|---|
-| 1.1 | Async execution: queries, open and refresh off the UI thread, with **Stop** (Ctrl+T) | ⬜ | **Next up.** A slow query or an unreachable host freezes the window today; only Test Connection runs in the background. |
+| 1.1 | Async execution: queries, open and refresh off the UI thread, with **Stop** (Ctrl+T) | ✅ 2026-10-19 | Opening, query and console statements, table pages, object lists and DDL run as background tasks over shared connections (`ui-egui/src/tasks.rs`). Stop is available as Ctrl+T, the Stop buttons (query tab, table tab, console, "Connecting…" in the tree) or closing the tab. The server stops the statement too (PostgreSQL `pg_cancel_backend`, MySQL/MariaDB `KILL QUERY`, SQLite progress handler). Pools of 4 let the tree work while a query runs. |
 | 1.2 | Control channel (`dbcraft --control`, loopback + token, JSON) and offscreen snapshot, so agents can drive and see the UI | 🟡 | `--select` / `--open-table` / `--new-connection` startup flags and egui_kittest UI tests exist. |
 | 1.3 | Passwords in the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service) | ⬜ | Plain text in `workspace.json` today. |
 | 1.4 | Options dialog (Tools › Options): General, Tabs, Editor, Records (page size, auto begin transaction), Display formats | ⬜ | |
 | 1.5 | Dark theme; toolbar "Use Big Icons" / "Show Caption" toggles | ⬜ | |
-| 1.6 | Restore tabs on startup ("continue where you left off") | ⬜ | `UiState` is serde-ready. |
+| 1.6 | Restore tabs on startup ("continue where you left off") | 🚫 | Owner's decision: DbCraft starts clean, with no tabs reopened and no connection opened automatically. |
+
+### Prioritised tools (owner's priority: fast, reliable, complete)
+
+| # | Feature | Status | Notes |
+|---|---|---|---|
+| 1.T1 | **Backup / Restore**: fast (streamed, batched multi-row INSERTs, no full-table buffering), complete (indexes, foreign keys, defaults, auto-increment, views), compressed option, Extract SQL | 🟡 2026-10-14 | Works on all engines (see 2.11). Missing: indexes/FKs/defaults/views in the dump, streaming for big tables, compression. |
+| 1.T2 | **Data Transfer**: fast (keyset paging, multi-row INSERT batches, one transaction per batch), complete (indexes, foreign keys, defaults, auto-increment, views), profiles | 🟡 2026-10-14 | Works cross-engine (see 3.1). Missing: indexes, FKs, defaults, auto-increment, views, keyset paging, profiles. |
+| 1.T3 | **Structure Synchronization**: compare two databases (any engines), show differences per object, generate the deployment script, run it | ⬜ | Moved up from P3 (was 3.2). Needs a schema model (tables, columns, PK, indexes, FKs) read from each driver, a differ and DDL generation per dialect. |
 
 ### Query editor
 
@@ -78,7 +86,6 @@ _Last updated: 2026-10-14 (second pass: grid, saved queries, Data Transfer, Cons
 
 | # | Feature | Status | Notes |
 |---|---|---|---|
-| 2.1 | **Table Designer**: fields (insert, reorder, find), indexes, foreign keys, uniques, checks, triggers, options, comment, SQL Preview; New/Design Table | ⬜ | The biggest single item. Generate DDL diffs per engine. |
 | 2.2 | Table actions: Delete, Empty, Truncate, Rename, Duplicate (structure / structure+data), Open Table (Quick) | ⬜ | |
 | 2.3 | View designer: Definition, Preview, Explain, View Builder, Beautify | ⬜ | |
 | 2.4 | Functions/Procedures: wizard, designer, Execute with Input Parameter dialog, multiple result sets | ⬜ | Listed in the tree today. |
@@ -88,7 +95,7 @@ _Last updated: 2026-10-14 (second pass: grid, saved queries, Data Transfer, Cons
 | 2.8 | Import Wizard: CSV, TXT, JSON, XML, Excel; field mapping; import modes; profiles | ⬜ | |
 | 2.9 | Export Wizard: CSV, TXT, JSON, XML, SQL, HTML, Excel; options; profiles | 🟡 | CSV of the current result only (`export.resultCsv`). |
 | 2.10 | Dump SQL File (structure / structure+data) and Execute SQL File | 🟡 2026-10-14 | Data Transfer → File writes a SQL script in any dialect (MySQL / PostgreSQL / SQLite). Execute SQL File: via Backup › Restore for now. |
-| 2.11 | Backup / Restore (built-in format) / Extract SQL | ✅ 2026-10-14 | Backup toolbar button / Backups tree node: New Backup (comment), list (created, tables, rows, size, comment), Restore (confirm; drops and recreates the backed-up tables), Delete (confirm; only inside the backups folder), Open Folder. SQL scripts named YYYYMMDDhhmmss (same second → `_2`). Runs in the background with a live log. Tested on SQLite, PostgreSQL, MySQL, MariaDB. |
+| 2.11 | Backup / Restore (built-in format) / Extract SQL | ✅ 2026-10-14 | Optimisation and completeness tracked in 1.T1. Backup toolbar button / Backups tree node: New Backup (comment), list (created, tables, rows, size, comment), Restore (confirm; drops and recreates the backed-up tables), Delete (confirm; only inside the backups folder), Open Folder. SQL scripts named YYYYMMDDhhmmss (same second → `_2`). Runs in the background with a live log. Tested on SQLite, PostgreSQL, MySQL, MariaDB. |
 | 2.12 | Maintain menu: Analyze, Check, Optimize, Repair, Vacuum, Reindex, Get Rows Count | ⬜ | |
 | 2.13 | Find in Database/Schema (Ctrl+Shift+F): data or structure, contains / whole word / prefix / regex | ⬜ | |
 | 2.14 | Server Monitor: process list (End Process), variables, status | ⬜ | |
@@ -100,8 +107,9 @@ _Last updated: 2026-10-14 (second pass: grid, saved queries, Data Transfer, Cons
 
 | # | Feature | Status | Notes |
 |---|---|---|---|
-| 3.1 | Data Transfer (cross-engine, objects, options, SQL file target, profiles) | ✅ 2026-10-14 | Tools › Data Transfer: source/target connection + database or SQL file (choose dialect), table checklist, options (create tables, drop target first, create records, continue on error, batch size), background run with live log, Save as Batch Job. Carries columns (engine-neutral types), NOT NULL, primary keys; converts booleans, binary, datetimes per engine. Tested PG→MySQL, MySQL→PG, MariaDB→SQLite, SQLite→MariaDB, PG→SQLite. Missing: indexes, foreign keys, defaults, auto-increment, views/routines, profiles. |
-| 3.2 | Structure Synchronization (compare, DDL diff, deployment script) | ⬜ | Builds on the Table Designer's DDL generation. |
+| 3.1 | Data Transfer (cross-engine, objects, options, SQL file target, profiles) | ✅ 2026-10-14 | Optimisation and completeness tracked in 1.T2. Tools › Data Transfer: source/target connection + database or SQL file (choose dialect), table checklist, options (create tables, drop target first, create records, continue on error, batch size), background run with live log, Save as Batch Job. Carries columns (engine-neutral types), NOT NULL, primary keys; converts booleans, binary, datetimes per engine. Tested PG→MySQL, MySQL→PG, MariaDB→SQLite, SQLite→MariaDB, PG→SQLite. Missing: indexes, foreign keys, defaults, auto-increment, views/routines, profiles. |
+| 3.2 | Structure Synchronization | ➡️ | Moved to 1.T3. |
+| 3.10 | **Table Designer** (moved down from 2.1 by the owner): fields (insert, reorder, find), indexes, foreign keys, uniques, checks, triggers, options, comment, SQL Preview; New/Design Table | ⬜ | Reuses the schema model and DDL generation from 1.T3. |
 | 3.3 | Data Synchronization (key mapping, compare & preview, deploy) | ⬜ | |
 | 3.4 | Data Generation (generators: numbers, dates, names, emails, FK, regex…) | ⬜ | |
 | 3.5 | Query Builder (visual SELECT: joins, criteria, layers) and Query Parameters `[$name]` | ⬜ | |

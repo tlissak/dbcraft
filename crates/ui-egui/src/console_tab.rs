@@ -41,6 +41,11 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut ConsoleTab, session: &Session, ac
             if ui.button("Clear").clicked() {
                 tab.scrollback.clear();
             }
+            if let Some(task) = &tab.task
+                && crate::tasks::running_bar(ui, task, "Running…")
+            {
+                actions.push(Action::StopTask(idx));
+            }
         });
     });
     let bg = egui::Color32::from_rgb(0x1e, 0x1f, 0x22);
@@ -65,7 +70,8 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut ConsoleTab, session: &Session, ac
             );
             // Check Enter before re-taking focus: requesting focus first would cancel `lost_focus`.
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if entered {
+            // One statement at a time, like mysql/psql: Enter waits while one runs.
+            if entered && tab.task.is_none() {
                 actions.push(Action::ConsoleEnter(idx));
             }
             if r.has_focus() {

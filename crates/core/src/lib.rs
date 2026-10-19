@@ -17,6 +17,9 @@ pub enum Error {
     Database(String),
     #[error("i/o error: {0}")]
     Io(String),
+    /// The user pressed Stop (or the job was abandoned).
+    #[error("stopped by the user")]
+    Cancelled,
 }
 
 impl From<std::io::Error> for Error {

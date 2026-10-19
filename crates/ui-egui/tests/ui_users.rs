@@ -24,7 +24,7 @@ fn create_grant_and_delete_a_user_from_the_ui() {
     let mut admin = pg_session();
     let _ = admin.dispatch("user.delete", &json!({"connection": "pg", "name": "ui_test_user"}));
 
-    let mut app = DbCraftApp::new(pg_session(), None);
+    let mut app = DbCraftApp::new(pg_session(), None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "pg".into(), database: None });
     app.startup(StartupAction::Mode("users".into()));
     let mut h = Harness::builder().with_size(egui::vec2(1500.0, 950.0)).build_eframe(|_| app);

@@ -45,13 +45,19 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut QueryTab, conns: &[(String, Strin
                     ui.selectable_value(&mut tab.database, Some(db.clone()), db);
                 }
             });
+            let idle = tab.task.is_none();
             let run = ui
-                .add_enabled(tab.connection.is_some(), egui::Button::new(RichText::new(format!("{} Run", icons::PLAY)).color(Tokens::SUCCESS)))
+                .add_enabled(tab.connection.is_some() && idle, egui::Button::new(RichText::new(format!("{} Run", icons::PLAY)).color(Tokens::SUCCESS)))
                 .on_hover_text("Run (Ctrl+R)")
                 .clicked()
                 || ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R));
-            if run && tab.connection.is_some() {
+            if run && tab.connection.is_some() && idle {
                 actions.push(Action::RunQuery(idx));
+            }
+            if let Some(task) = &tab.task
+                && crate::tasks::running_bar(ui, task, "Running…")
+            {
+                actions.push(Action::StopTask(idx));
             }
             if tab.dirty() {
                 ui.weak("● modified");

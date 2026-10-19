@@ -23,7 +23,7 @@ fn app(name: &str) -> (DbCraftApp, Session) {
     let mut check = Session::new();
     check.dispatch("connection.save", &cfg).unwrap();
     check.dispatch("connection.open", &json!({"id": "c"})).unwrap();
-    let mut a = DbCraftApp::new(s, None);
+    let mut a = DbCraftApp::new(s, None).waiting_for_tasks();
     a.startup(StartupAction::OpenTable { connection: "c".into(), database: "main".into(), schema: None, table: "film".into() });
     (a, check)
 }

@@ -1,21 +1,145 @@
+use std::cell::RefCell;
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use dbcraft_core::{Error, Result, ResultSet, Value};
 use tokio::runtime::Runtime;
+use tokio::sync::Notify;
 
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a cancelled statement gets to stop on its own before its connection is dropped.
+const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
 static RUNTIME: OnceLock<std::result::Result<Runtime, String>> = OnceLock::new();
 
-/// Run a future to completion on the shared runtime. Must not be called from inside an async
-/// context (the engine is synchronous, so it never is).
-pub fn block_on<F: Future>(f: F) -> Result<F::Output> {
+fn runtime() -> Result<&'static Runtime> {
     let rt = RUNTIME.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().map_err(|e| e.to_string()));
-    match rt {
-        Ok(rt) => Ok(rt.block_on(f)),
-        Err(e) => Err(Error::Database(format!("cannot start the async runtime: {e}"))),
+    rt.as_ref().map_err(|e| Error::Database(format!("cannot start the async runtime: {e}")))
+}
+
+/// Server-side "stop that query" action, registered by a driver while a statement runs.
+type KillFn = Box<dyn FnOnce() + Send>;
+
+#[derive(Default)]
+struct CancelInner {
+    cancelled: AtomicBool,
+    /// A server-side stop was requested (worth waiting a moment for the statement to end).
+    killed: AtomicBool,
+    notify: Notify,
+    kill: Mutex<Option<KillFn>>,
+}
+
+/// Stop button for driver calls made on one thread (see [`with_cancel`]). Cancelling makes the
+/// running call return [`Error::Cancelled`] at once and asks the server to stop the statement
+/// (PostgreSQL `pg_cancel_backend`, MySQL `KILL QUERY`); later calls fail before they start.
+#[derive(Clone, Default)]
+pub struct Cancel(Arc<CancelInner>);
+
+impl Cancel {
+    pub fn new() -> Self {
+        Cancel::default()
+    }
+
+    /// Safe to call from any thread, any number of times; never blocks.
+    pub fn cancel(&self) {
+        if self.0.cancelled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.0.notify.notify_waiters();
+        let kill = self.0.kill.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(kill) = kill {
+            self.0.killed.store(true, Ordering::SeqCst);
+            kill();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        // Register before checking the flag so a cancel between the two isn't missed.
+        let notified = self.0.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<Cancel>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with `cancel` as the Stop button for every driver call `f` makes on this thread.
+pub fn with_cancel<R>(cancel: &Cancel, f: impl FnOnce() -> R) -> R {
+    struct Reset(Option<Cancel>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            CURRENT.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let _reset = Reset(CURRENT.with(|c| c.borrow_mut().replace(cancel.clone())));
+    f()
+}
+
+/// The Stop button for this thread's driver calls, if any.
+pub fn current_cancel() -> Option<Cancel> {
+    CURRENT.with(|c| c.borrow().clone())
+}
+
+/// While the returned guard lives, cancelling this thread's calls also runs `kill` (which must
+/// not block: spawn the server round trip with [`spawn`]).
+pub fn on_cancel(kill: impl FnOnce() + Send + 'static) -> KillGuard {
+    let cancel = current_cancel();
+    if let Some(c) = &cancel {
+        *c.0.kill.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(kill));
+    }
+    KillGuard(cancel)
+}
+
+pub struct KillGuard(Option<Cancel>);
+
+impl Drop for KillGuard {
+    fn drop(&mut self) {
+        if let Some(c) = &self.0 {
+            c.0.kill.lock().unwrap_or_else(PoisonError::into_inner).take();
+        }
+    }
+}
+
+/// Fire-and-forget a future on the shared runtime (server-side cancel requests).
+pub fn spawn(f: impl Future<Output = ()> + Send + 'static) {
+    if let Ok(rt) = runtime() {
+        rt.spawn(f);
+    }
+}
+
+/// Run a future to completion on the shared runtime. Must not be called from inside an async
+/// context (the engine is synchronous, so it never is). Honours this thread's [`Cancel`].
+pub fn block_on<F: Future>(f: F) -> Result<F::Output> {
+    let rt = runtime()?;
+    match current_cancel() {
+        None => Ok(rt.block_on(f)),
+        Some(c) if c.is_cancelled() => Err(Error::Cancelled),
+        Some(c) => rt.block_on(async {
+            tokio::pin!(f);
+            tokio::select! {
+                biased;
+                // A statement the server stopped fails with its own error; report the Stop instead.
+                out = &mut f => return if c.is_cancelled() { Err(Error::Cancelled) } else { Ok(out) },
+                () = c.cancelled() => {}
+            }
+            // If the server was asked to stop the statement, let it fail cleanly for a moment so
+            // the connection goes back to the pool in a known state; otherwise drop it now.
+            if c.0.killed.load(Ordering::SeqCst) {
+                let _ = tokio::time::timeout(CANCEL_GRACE, &mut f).await;
+            }
+            Err(Error::Cancelled)
+        }),
     }
 }
 
@@ -147,7 +271,45 @@ pub(crate) use run_atomic;
 
 #[cfg(test)]
 mod tests {
-    use super::returns_rows;
+    use super::*;
+
+    #[test]
+    fn cancel_interrupts_block_on() {
+        let c = Cancel::new();
+        let c2 = c.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            c2.cancel();
+        });
+        let start = std::time::Instant::now();
+        let r = with_cancel(&c, || block_on(async { tokio::time::sleep(Duration::from_secs(30)).await }));
+        t.join().unwrap();
+        assert!(matches!(r, Err(Error::Cancelled)));
+        assert!(start.elapsed() < Duration::from_secs(1), "no server-side stop pending: no grace wait");
+        // Later calls fail before they start; other threads are unaffected.
+        assert!(matches!(with_cancel(&c, || block_on(async { 1 })), Err(Error::Cancelled)));
+        assert_eq!(block_on(async { 2 }).unwrap(), 2);
+    }
+
+    #[test]
+    fn kill_runs_once_while_registered() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = Cancel::new();
+        with_cancel(&c, || {
+            let h = hits.clone();
+            let _g = on_cancel(move || {
+                h.fetch_add(1, Ordering::SeqCst);
+            });
+            c.cancel();
+            c.cancel();
+        });
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // After the guard drops, nothing is registered.
+        let c = Cancel::new();
+        with_cancel(&c, || drop(on_cancel(|| panic!("must not run"))));
+        c.cancel();
+        assert!(current_cancel().is_none());
+    }
 
     #[test]
     fn classifies_statements() {

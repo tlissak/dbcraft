@@ -31,11 +31,18 @@
 
 ## Drivers
 
-`Connection` is synchronous on purpose (simple engine, simple tests). Each driver owns an sqlx pool and blocks on a shared 2-thread tokio runtime (`drivers/src/common.rs`). Cell decoding tries candidate Rust types per engine in order (`decode_row!`); an unknown type shows as `<TYPE>` instead of failing the whole query.
+`Connection` is synchronous on purpose (simple engine, simple tests) and shared: methods take `&self`, the trait is `Send + Sync`, and the session holds `Arc<dyn Connection>`. Each driver owns sqlx pools (4 connections; 1 for an in-memory SQLite) and blocks on a shared 2-thread tokio runtime (`drivers/src/common.rs`). Cell decoding tries candidate Rust types per engine in order (`decode_row!`); an unknown type shows as `<TYPE>` instead of failing the whole query.
 
 PostgreSQL scopes connections to one database, so `PgConn` keeps one pool per database. MySQL switches with `USE` on an acquired connection.
 
-**Known limitation:** queries run on the UI thread, so a slow query freezes the window. Moving `dispatch` for long commands to a worker (with cancel) is item 1.1 in `ROADMAP.md`.
+## Background work and Stop
+
+Nothing slow runs on the UI thread.
+
+- **Tasks** (`ui-egui/src/tasks.rs`) do interactive work: opening a connection, running a query or console statement, loading a table page, object lists or DDL. A task runs engine commands on a worker over `Session::fork_shared()`, which shares the live connections. When it finishes, the UI thread calls `Session::absorb(worker)` to take back newly opened connections, caches, the last result and messages; a connection the user closed meanwhile stays closed. Query, table and console tabs own their task. The tree's open/load tasks live in `DbCraftApp::bg`, and actions waiting for a connection that is still opening are queued in `after_open`.
+- **Jobs** (`ui-egui/src/jobs.rs`) run long tools (transfer, backup, automation) on a `Session::fork` with their own connections and a progress log.
+- **Stop** (Ctrl+T, the Stop buttons, closing a tab): `dbcraft_drivers::Cancel`. A worker runs under `with_cancel`, and every driver `block_on` on that thread races the Stop signal, so connect, metadata and queries can all be stopped. Drivers also stop the statement server-side: PostgreSQL `pg_cancel_backend(pid)` and MySQL/MariaDB `KILL QUERY id` over a side connection, and SQLite through a progress handler. A stopped call returns `Error::Cancelled`.
+- UI tests use `DbCraftApp::waiting_for_tasks()` so each task finishes before the next frame. `tests/ui_async.rs` drives the real asynchronous path.
 
 ## Persistence
 

@@ -6,7 +6,7 @@ use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::{AssertSqlSafe, Row};
 
-use crate::common::{CONNECT_TIMEOUT, block_on, cell_str, cell_u64, columns_of, db_err, decode_row, returns_rows, run_atomic};
+use crate::common::{CONNECT_TIMEOUT, block_on, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, returns_rows, run_atomic};
 
 pub struct SqliteConn {
     pool: SqlitePool,
@@ -18,7 +18,23 @@ impl SqliteConn {
             return Err(Error::InvalidParam("SQLite connection needs a database file path".into()));
         }
         let opts = SqliteConnectOptions::new().filename(&cfg.database).create_if_missing(true);
-        let pool = block_on(SqlitePoolOptions::new().max_connections(1).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
+        // Several connections let the tree read while a long query runs; an in-memory database
+        // exists per connection, so it gets exactly one.
+        let memory = cfg.database.trim() == ":memory:" || cfg.database.contains("mode=memory");
+        let pool = block_on(
+            SqlitePoolOptions::new()
+                .max_connections(if memory { 1 } else { 4 })
+                // A Stop handler from an earlier query must not interrupt the next one.
+                .before_acquire(|conn, _| {
+                    Box::pin(async move {
+                        conn.lock_handle().await?.remove_progress_handler();
+                        Ok(true)
+                    })
+                })
+                .acquire_timeout(CONNECT_TIMEOUT)
+                .connect_with(opts),
+        )?
+        .map_err(db_err)?;
         Ok(SqliteConn { pool })
     }
 }
@@ -32,17 +48,17 @@ impl crate::Connection for SqliteConn {
         Dialect::Sqlite
     }
 
-    fn server_version(&mut self) -> Result<String> {
+    fn server_version(&self) -> Result<String> {
         let row = block_on(sqlx::query("select sqlite_version()").fetch_one(&self.pool))?.map_err(db_err)?;
         Ok(format!("SQLite {}", row.try_get::<String, _>(0).map_err(db_err)?))
     }
 
-    fn list_databases(&mut self) -> Result<Vec<String>> {
+    fn list_databases(&self) -> Result<Vec<String>> {
         let rows = block_on(sqlx::query("select name from pragma_database_list order by seq").fetch_all(&self.pool))?.map_err(db_err)?;
         rows.iter().map(|r| r.try_get::<String, _>(0).map_err(db_err)).collect()
     }
 
-    fn list_objects(&mut self, database: &str) -> Result<Vec<DbObject>> {
+    fn list_objects(&self, database: &str) -> Result<Vec<DbObject>> {
         let master = format!("{}.sqlite_master", quote_ident(Dialect::Sqlite, database));
         let sql = format!("select type, name from {master} where type in ('table','view','trigger','index') and name not like 'sqlite_%' order by type, name");
         let rows = block_on(sqlx::query(AssertSqlSafe(sql.clone())).fetch_all(&self.pool))?.map_err(db_err)?;
@@ -59,7 +75,7 @@ impl crate::Connection for SqliteConn {
         Ok(out)
     }
 
-    fn table_info(&mut self, database: &str) -> Result<Vec<TableInfo>> {
+    fn table_info(&self, database: &str) -> Result<Vec<TableInfo>> {
         let db = quote_ident(Dialect::Sqlite, database);
         let list =
             self.query(None, &format!("select name, type from {db}.sqlite_master where type in ('table','view') and name not like 'sqlite_%' order by name"))?;
@@ -79,7 +95,7 @@ impl crate::Connection for SqliteConn {
         Ok(out)
     }
 
-    fn table_ddl(&mut self, database: &str, _schema: Option<&str>, table: &str) -> Result<String> {
+    fn table_ddl(&self, database: &str, _schema: Option<&str>, table: &str) -> Result<String> {
         let sql = format!(
             "select sql from {}.sqlite_master where name = {} and sql is not null order by type desc",
             quote_ident(Dialect::Sqlite, database),
@@ -93,13 +109,13 @@ impl crate::Connection for SqliteConn {
         Ok(parts.join("\n\n"))
     }
 
-    fn execute_atomic(&mut self, _database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
+    fn execute_atomic(&self, _database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
         let pool = self.pool.clone();
         let stmts = stmts.to_vec();
         block_on(async move { run_atomic!(pool.begin().await.map_err(db_err)?, stmts) })?
     }
 
-    fn columns(&mut self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+    fn columns(&self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         let sql = format!(
             "select name, type, \"notnull\", pk from pragma_table_info({}, {}) order by cid",
             quote_literal(Dialect::Sqlite, table),
@@ -123,7 +139,7 @@ impl crate::Connection for SqliteConn {
             .collect())
     }
 
-    fn primary_key(&mut self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<String>> {
+    fn primary_key(&self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<String>> {
         let database = database.unwrap_or("main");
         let sql = format!(
             "select name from pragma_table_info({}, {}) where pk > 0 order by pk",
@@ -134,11 +150,25 @@ impl crate::Connection for SqliteConn {
         Ok((0..rs.rows.len()).filter_map(|i| cell_str(&rs, i, 0)).collect())
     }
 
-    fn query(&mut self, _database: Option<&str>, sql: &str) -> Result<ResultSet> {
+    fn query(&self, _database: Option<&str>, sql: &str) -> Result<ResultSet> {
         let start = Instant::now();
         let mut rs = ResultSet::default();
-        if returns_rows(sql) {
-            let rows = block_on(sqlx::query(AssertSqlSafe(sql.to_string())).fetch_all(&self.pool))?.map_err(db_err)?;
+        let wants_rows = returns_rows(sql);
+        let (pool, sql, cancel) = (self.pool.clone(), sql.to_string(), current_cancel());
+        let (rows, affected) = block_on(async move {
+            let mut conn = pool.acquire().await?;
+            // With a Stop button, SQLite checks it every few thousand VM steps and interrupts.
+            if let Some(c) = cancel {
+                conn.lock_handle().await?.set_progress_handler(2000, move || !c.is_cancelled());
+            }
+            if wants_rows {
+                Ok::<_, sqlx::Error>((sqlx::query(AssertSqlSafe(sql)).fetch_all(&mut *conn).await?, 0))
+            } else {
+                Ok((Vec::new(), sqlx::raw_sql(AssertSqlSafe(sql)).execute(&mut *conn).await?.rows_affected()))
+            }
+        })?
+        .map_err(db_err)?;
+        if wants_rows {
             if let Some(first) = rows.first() {
                 rs.columns = columns_of!(first);
             }
@@ -154,7 +184,7 @@ impl crate::Connection for SqliteConn {
                 })
                 .collect();
         } else {
-            rs.rows_affected = block_on(sqlx::raw_sql(AssertSqlSafe(sql.to_string())).execute(&self.pool))?.map_err(db_err)?.rows_affected();
+            rs.rows_affected = affected;
         }
         rs.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(rs)

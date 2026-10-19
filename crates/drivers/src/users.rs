@@ -93,7 +93,7 @@ fn unsupported(kind: DbKind) -> Error {
     Error::Unsupported(format!("user management is not available for {}", kind.label()))
 }
 
-fn is_mariadb(conn: &mut dyn Connection) -> bool {
+fn is_mariadb(conn: &dyn Connection) -> bool {
     conn.kind() == DbKind::Mariadb || conn.server_version().is_ok_and(|v| v.to_ascii_lowercase().contains("mariadb"))
 }
 
@@ -101,7 +101,7 @@ fn is_mariadb(conn: &mut dyn Connection) -> bool {
 // Reading
 
 /// Every user and role, without grants (fast; for the list).
-pub fn list(conn: &mut dyn Connection) -> Result<Vec<UserInfo>> {
+pub fn list(conn: &dyn Connection) -> Result<Vec<UserInfo>> {
     match conn.kind() {
         DbKind::Mysql | DbKind::Mariadb => {
             let maria = is_mariadb(conn);
@@ -155,7 +155,7 @@ pub fn list(conn: &mut dyn Connection) -> Result<Vec<UserInfo>> {
 }
 
 /// One user or role with its memberships and grants.
-pub fn get(conn: &mut dyn Connection, name: &str, host: Option<&str>) -> Result<UserInfo> {
+pub fn get(conn: &dyn Connection, name: &str, host: Option<&str>) -> Result<UserInfo> {
     let mut user = list(conn)?
         .into_iter()
         .find(|u| u.name == name && (host.is_none() || u.host.as_deref() == host))
@@ -510,7 +510,7 @@ pub fn drop_sql(kind: DbKind, mariadb: bool, user: &UserInfo) -> Result<Vec<Stri
 }
 
 /// Whether the server behind a MySQL-protocol connection is MariaDB (its role syntax differs).
-pub fn server_is_mariadb(conn: &mut dyn Connection) -> bool {
+pub fn server_is_mariadb(conn: &dyn Connection) -> bool {
     is_mariadb(conn)
 }
 

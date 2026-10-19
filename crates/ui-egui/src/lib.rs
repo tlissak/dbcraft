@@ -14,6 +14,7 @@ mod objects_tab;
 mod query_tab;
 pub mod state;
 mod table_tab;
+pub mod tasks;
 pub mod theme;
 mod transfer_tab;
 mod user_tab;

@@ -151,7 +151,7 @@ fn config_from_params(p: &Json, id: String) -> Result<ConnectionConfig> {
 /// Navicat's "Test Connection": connect with unsaved settings, report the server, disconnect.
 fn test(_: &mut Session, p: &Json) -> Result<Json> {
     let cfg = config_from_params(p, "test".into())?;
-    let mut conn = dbcraft_drivers::connect(&cfg)?;
+    let conn = dbcraft_drivers::connect(&cfg)?;
     let version = conn.server_version()?;
     Ok(json!({ "ok": true, "version": version, "via_ssh": cfg.ssh.is_some() }))
 }
@@ -183,10 +183,10 @@ fn list(s: &mut Session, _: &Json) -> Result<Json> {
 fn open(s: &mut Session, p: &Json) -> Result<Json> {
     let id = str_req(p, "id")?.to_string();
     let cfg = s.workspace.connection(&id)?.clone();
-    let mut conn = dbcraft_drivers::connect(&cfg)?;
+    let conn = dbcraft_drivers::connect(&cfg)?;
     let version = conn.server_version()?;
     let dbs = conn.list_databases()?;
-    s.open.insert(id.clone(), conn);
+    s.open.insert(id.clone(), std::sync::Arc::from(conn));
     s.databases.insert(id.clone(), dbs.clone());
     s.messages.push(format!("Connected to {} ({version})", cfg.name));
     Ok(json!({ "version": version, "databases": dbs }))

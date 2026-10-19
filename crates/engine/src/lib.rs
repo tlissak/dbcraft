@@ -15,7 +15,7 @@ pub mod transfer;
 mod transfer_cmds;
 mod user_cmds;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,8 +26,8 @@ pub use commands::{CommandSpec, commands};
 pub use data_cmds::{DEFAULT_PAGE, FILTER_OPS, TablePage};
 use dbcraft_core::{Error, Result, ResultSet, TableInfo};
 use dbcraft_drivers::Connection;
-pub use dbcraft_drivers::supported_kinds;
 pub use dbcraft_drivers::users::{PrivilegeCatalog, catalog as privilege_catalog};
+pub use dbcraft_drivers::{Cancel, supported_kinds, with_cancel};
 use dbcraft_model::{DbObject, Workspace};
 use serde_json::Value as Json;
 
@@ -43,7 +43,9 @@ pub struct Session {
     pub workspace: Workspace,
     /// Where the workspace is saved after each change (`None`: in-memory, e.g. tests).
     pub workspace_path: Option<PathBuf>,
-    open: HashMap<String, Box<dyn Connection>>,
+    open: HashMap<String, Arc<dyn Connection>>,
+    /// Connections that were open when this session was forked with [`Session::fork_shared`].
+    forked_open: HashSet<String>,
     /// Databases per open connection, filled on open.
     pub databases: HashMap<String, Vec<String>>,
     /// Objects per (connection id, database), filled when a database is expanded.
@@ -104,18 +106,18 @@ impl Session {
         !self.open.is_empty()
     }
 
-    pub(crate) fn conn(&mut self, id: &str) -> Result<&mut Box<dyn Connection>> {
-        self.open.get_mut(id).ok_or_else(|| Error::InvalidParam(format!("connection `{id}` is not open (run connection.open first)")))
+    pub(crate) fn conn(&self, id: &str) -> Result<Arc<dyn Connection>> {
+        self.open.get(id).cloned().ok_or_else(|| Error::InvalidParam(format!("connection `{id}` is not open (run connection.open first)")))
     }
 
     /// Like `conn`, but opens a saved connection on demand (tools, automation, background jobs).
-    pub(crate) fn conn_auto(&mut self, id: &str) -> Result<&mut Box<dyn Connection>> {
+    pub(crate) fn conn_auto(&mut self, id: &str) -> Result<Arc<dyn Connection>> {
         if !self.open.contains_key(id) {
             let cfg = self.workspace.connection(id)?.clone();
-            let mut conn = dbcraft_drivers::connect(&cfg)?;
+            let conn = dbcraft_drivers::connect(&cfg)?;
             let dbs = conn.list_databases()?;
             self.databases.insert(id.to_string(), dbs);
-            self.open.insert(id.to_string(), conn);
+            self.open.insert(id.to_string(), Arc::from(conn));
             self.report(&format!("Connected to {}", cfg.name));
         }
         self.conn(id)
@@ -133,6 +135,43 @@ impl Session {
     /// no workspace file (the caller keeps ownership of saving).
     pub fn fork(&self, progress: Option<ProgressSink>) -> Session {
         Session { workspace: self.workspace.clone(), data_dir: self.data_dir.clone(), progress, ..Session::default() }
+    }
+
+    /// A session for a background task that shares this session's live connections (queries,
+    /// opening, loading objects). Run commands on it on a worker thread, then hand it back with
+    /// [`Session::absorb`].
+    pub fn fork_shared(&self) -> Session {
+        Session {
+            workspace: self.workspace.clone(),
+            data_dir: self.data_dir.clone(),
+            open: self.open.clone(),
+            forked_open: self.open.keys().cloned().collect(),
+            databases: self.databases.clone(),
+            ..Session::default()
+        }
+    }
+
+    /// Take back what a [`fork_shared`](Session::fork_shared) worker learned: connections it
+    /// opened, databases, object lists, its last result and messages. A connection the user
+    /// closed meanwhile stays closed.
+    pub fn absorb(&mut self, worker: Session) {
+        let Session { open, forked_open, databases, objects, tables, last_result, messages, .. } = worker;
+        for (id, conn) in open {
+            if !forked_open.contains(&id) && !self.open.contains_key(&id) && self.workspace.connection(&id).is_ok() {
+                self.open.insert(id, conn);
+            }
+        }
+        let live = |id: &String| self.open.contains_key(id);
+        let databases: Vec<_> = databases.into_iter().filter(|(id, _)| live(id)).collect();
+        let objects: Vec<_> = objects.into_iter().filter(|((id, _), _)| live(id)).collect();
+        let tables: Vec<_> = tables.into_iter().filter(|((id, _), _)| live(id)).collect();
+        self.databases.extend(databases);
+        self.objects.extend(objects);
+        self.tables.extend(tables);
+        if last_result.is_some() {
+            self.last_result = last_result;
+        }
+        self.messages.extend(messages);
     }
 
     /// Run a command by id. Never panics: an escaped panic is caught and returned as an error so

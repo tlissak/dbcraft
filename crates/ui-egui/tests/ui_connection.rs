@@ -9,7 +9,7 @@ use egui_kittest::kittest::Queryable;
 
 #[test]
 fn ssh_tab_and_test_connection() {
-    let mut app = DbCraftApp::new(Session::new(), None);
+    let mut app = DbCraftApp::new(Session::new(), None).waiting_for_tasks();
     app.startup(StartupAction::NewConnection);
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| app);
     h.run();
@@ -63,7 +63,7 @@ fn no_auto_connect_at_launch() {
     let (mut s, _) = Session::with_workspace_file(d.join("workspace.json"));
     s.dispatch("connection.save", &serde_json::json!({"id": "lite", "kind": "sqlite", "name": "lite", "database": d.join("lite.db").to_string_lossy()}))
         .unwrap();
-    let app = DbCraftApp::new(s, None);
+    let app = DbCraftApp::new(s, None).waiting_for_tasks();
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|cc| {
         // What persistence restores when the node was expanded last time.
         let id = egui::Id::new(("conn", "lite"));

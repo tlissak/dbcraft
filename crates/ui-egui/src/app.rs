@@ -13,6 +13,7 @@ use crate::icons;
 use crate::jobs::Job;
 use crate::menu_catalog::{CATALOG, MENUS};
 use crate::state::{AutomationView, ConnectionForm, ConsoleTab, ObjectsMode, QueryTab, Selection, Tab, TableTab, TransferForm, UiState, UserTab};
+use crate::tasks::{self, Task};
 use crate::theme::Tokens;
 
 /// Something the user asked for this frame; applied after drawing so drawing can borrow the
@@ -83,6 +84,10 @@ pub enum Action {
     UserSave(usize),
     /// Replace the SQL of the active query tab.
     SetQueryText(String),
+    /// Stop the running task of tab `i` (Stop button, Ctrl+T).
+    StopTask(usize),
+    /// Give up opening this connection.
+    StopOpening(String),
 }
 
 /// Navigation groups under a database, in Navicat's order.
@@ -111,6 +116,20 @@ pub struct DbCraftApp {
     /// expanded connection node opens its connection; at launch we collapse them instead, so
     /// connecting is always a manual action.
     tree_started: bool,
+    /// Opening connections and loading object lists in the background (ROADMAP 1.1).
+    bg: Vec<(Task, Then)>,
+    /// Actions waiting for a connection that is still opening.
+    after_open: Vec<(String, Action)>,
+    /// Tests: wait for each background task right after starting it, so a frame later its result
+    /// is on screen (kittest doesn't run real time).
+    wait_for_tasks: bool,
+}
+
+/// What to do when a background task in [`DbCraftApp::bg`] finishes.
+enum Then {
+    Opened(String),
+    LoadedDb,
+    Ddl { schema: Option<String>, table: String },
 }
 
 /// Things to do at launch, from the command line (handy for agents and screenshots).
@@ -146,7 +165,24 @@ pub enum StartupAction {
 impl DbCraftApp {
     pub fn new(session: Session, startup_error: Option<String>) -> Self {
         let state = UiState { status: startup_error, ..UiState::default() };
-        DbCraftApp { session, state, tried: HashSet::new(), themed: false, startup: Vec::new(), ctx_for_jobs: egui::Context::default(), tree_started: false }
+        DbCraftApp {
+            session,
+            state,
+            tried: HashSet::new(),
+            themed: false,
+            startup: Vec::new(),
+            ctx_for_jobs: egui::Context::default(),
+            tree_started: false,
+            bg: Vec::new(),
+            after_open: Vec::new(),
+            wait_for_tasks: false,
+        }
+    }
+
+    /// Tests: finish each background task before the next frame (see `wait_for_tasks`).
+    pub fn waiting_for_tasks(mut self) -> Self {
+        self.wait_for_tasks = true;
+        self
     }
 
     pub fn startup(&mut self, a: StartupAction) {
@@ -181,6 +217,12 @@ impl DbCraftApp {
     fn apply(&mut self, ctx: &egui::Context, actions: Vec<Action>) {
         for a in actions {
             match a {
+                Action::Command("connection.open", params) => {
+                    if let Some(id) = params["id"].as_str() {
+                        self.open_async(id);
+                    }
+                }
+                Action::Command(id @ ("database.tables" | "database.objects"), params) => self.spawn_bg(vec![(id, params)], Then::LoadedDb),
                 Action::Command(id, params) => {
                     self.run(id, &params);
                 }
@@ -203,19 +245,14 @@ impl DbCraftApp {
                 Action::ReloadTable(i) => self.reload_table(i),
                 Action::ApplyTable(i) => self.apply_table(i),
                 Action::LoadDdl { connection, database, schema, table } => {
-                    let r = self.session.dispatch("table.ddl", &json!({ "connection": connection, "database": database, "schema": schema, "table": table }));
-                    self.state.objects.ddl = Some(match r {
-                        Ok(v) => v["ddl"].as_str().unwrap_or("").to_string(),
-                        Err(e) => format!("-- {e}"),
-                    });
+                    self.state.objects.ddl = Some("-- Loading…".into());
+                    let params = json!({ "connection": connection, "database": database, "schema": schema, "table": table });
+                    self.spawn_bg(vec![("table.ddl", params)], Then::Ddl { schema, table });
                 }
                 Action::LoadDb(conn, db) => {
-                    if self.tried.insert(format!("d/{conn}/{db}")) {
-                        self.run("database.objects", &json!({ "connection": conn, "database": db }));
-                    }
-                    if self.tried.insert(format!("t/{conn}/{db}")) {
-                        self.run("database.tables", &json!({ "connection": conn, "database": db }));
-                    }
+                    let objects = self.tried.insert(format!("d/{conn}/{db}"));
+                    let tables = self.tried.insert(format!("t/{conn}/{db}"));
+                    self.load_db(&conn, &db, tables, objects);
                 }
                 Action::EditConnection(id) => {
                     if let Ok(cfg) = self.session.workspace.connection(&id) {
@@ -368,6 +405,18 @@ impl DbCraftApp {
                         q.sql = sql;
                     }
                 }
+                Action::StopTask(i) => {
+                    if let Some(t) = self.state.tabs.get(i).and_then(tab_task) {
+                        t.cancel();
+                    }
+                }
+                Action::StopOpening(id) => {
+                    for (t, then) in &self.bg {
+                        if matches!(then, Then::Opened(c) if *c == id) {
+                            t.cancel();
+                        }
+                    }
+                }
                 Action::UserPreview(i) => self.user_save(i, true),
                 Action::UserSave(i) => self.user_save(i, false),
             }
@@ -375,20 +424,33 @@ impl DbCraftApp {
     }
 
     fn run_query(&mut self, i: usize) {
-        let Some(Tab::Query(q)) = self.state.tabs.get_mut(i) else { return };
+        let Some(Tab::Query(q)) = self.state.tabs.get(i) else { return };
         let Some(conn) = q.connection.clone() else { return };
-        let before = self.session.messages.len();
-        let r = self.session.dispatch("query.run", &json!({ "connection": conn, "database": q.database, "sql": q.sql }));
-        q.messages = self.session.messages.get(before..).map(<[String]>::to_vec).unwrap_or_default();
+        if q.task.is_some() {
+            return; // already running; Stop first
+        }
+        let mut steps = Vec::new();
+        if !self.session.is_open(&conn) {
+            steps.push(("connection.open", json!({ "id": conn })));
+        }
+        steps.push(("query.run", json!({ "connection": conn, "database": q.database, "sql": q.sql })));
+        let task = self.spawn_task(steps);
+        if let Some(Tab::Query(q)) = self.state.tabs.get_mut(i) {
+            q.task = Some(task);
+        }
+    }
+
+    fn query_done(q: &mut QueryTab, result: Result<Json, String>, messages: Vec<String>) {
+        q.messages = messages;
         q.grid = Default::default();
-        match r {
+        match result {
             Ok(v) => {
                 q.results = serde_json::from_value(v["results"].clone()).unwrap_or_default();
                 q.error = None;
                 q.result_idx = 0;
             }
             Err(e) => {
-                q.error = Some(e.to_string());
+                q.error = Some(e);
                 q.results.clear();
                 q.result_idx = 0; // == results.len(): the Message tab
             }
@@ -435,9 +497,7 @@ impl DbCraftApp {
             return;
         }
         let Some(sq) = self.session.workspace.queries.iter().find(|q| q.id == id).cloned() else { return };
-        if !self.session.is_open(&sq.connection) {
-            self.run("connection.open", &json!({ "id": sq.connection }));
-        }
+        self.open_async(&sq.connection);
         let tab = QueryTab {
             title: sq.name,
             connection: Some(sq.connection),
@@ -452,7 +512,7 @@ impl DbCraftApp {
     }
 
     /// Close tab `i`; `force` skips the unsaved-changes prompt.
-    pub(crate) fn close_tab(&mut self, i: usize, force: bool) {
+    pub fn close_tab(&mut self, i: usize, force: bool) {
         if i == 0 || i >= self.state.tabs.len() {
             return;
         }
@@ -461,7 +521,10 @@ impl DbCraftApp {
             self.state.active_tab = i;
             return;
         }
-        self.state.tabs.remove(i);
+        let removed = self.state.tabs.remove(i);
+        if let Some(t) = tab_task(&removed) {
+            t.cancel();
+        }
         if self.state.active_tab >= i {
             self.state.active_tab = self.state.active_tab.saturating_sub(1);
         }
@@ -506,12 +569,19 @@ impl DbCraftApp {
             return;
         }
         let (conn, db) = (t.connection.clone(), t.database.clone());
+        let mut steps = Vec::new();
         if !self.session.is_open(&conn) {
-            self.run("connection.open", &json!({ "id": conn }));
+            steps.push(("connection.open", json!({ "id": conn })));
         }
-        let r = self.session.dispatch("query.run", &json!({ "connection": conn, "database": db, "sql": stmt }));
-        let Some(Tab::Console(t)) = self.state.tabs.get_mut(i) else { return };
-        match r {
+        steps.push(("query.run", json!({ "connection": conn, "database": db, "sql": stmt })));
+        let task = self.spawn_task(steps);
+        if let Some(Tab::Console(t)) = self.state.tabs.get_mut(i) {
+            t.task = Some(task);
+        }
+    }
+
+    fn console_done(t: &mut ConsoleTab, result: Result<Json, String>) {
+        match result {
             Ok(v) => {
                 let results: Vec<ResultSet> = serde_json::from_value(v["results"].clone()).unwrap_or_default();
                 for rs in results {
@@ -527,10 +597,8 @@ impl DbCraftApp {
         let Some(Tab::Transfer(f)) = self.state.tabs.get(i) else { return };
         let (Some(conn), Some(db)) = (f.source.clone(), f.source_db.clone()) else {
             // Opening the source lists its databases for the picker.
-            if let Some(conn) = f.source.clone()
-                && !self.session.is_open(&conn)
-            {
-                self.run("connection.open", &json!({ "id": conn }));
+            if let Some(conn) = f.source.clone() {
+                self.open_async(&conn);
             }
             return;
         };
@@ -731,12 +799,9 @@ impl DbCraftApp {
     fn select(&mut self, sel: Selection) {
         if let Some(db) = &sel.database {
             let key = (sel.connection.clone(), db.clone());
-            if !self.session.tables.contains_key(&key) && self.tried.insert(format!("t/{}/{db}", sel.connection)) {
-                self.run("database.tables", &json!({ "connection": sel.connection, "database": db }));
-            }
-            if !self.session.objects.contains_key(&key) && self.tried.insert(format!("d/{}/{db}", sel.connection)) {
-                self.run("database.objects", &json!({ "connection": sel.connection, "database": db }));
-            }
+            let tables = !self.session.tables.contains_key(&key) && self.tried.insert(format!("t/{}/{db}", sel.connection));
+            let objects = !self.session.objects.contains_key(&key) && self.tried.insert(format!("d/{}/{db}", sel.connection));
+            self.load_db(&sel.connection, db, tables, objects);
         }
         if self.state.selection.as_ref().map(|s| (&s.connection, &s.database)) != Some((&sel.connection, &sel.database)) {
             self.state.objects.selected = None;
@@ -770,21 +835,199 @@ impl DbCraftApp {
     }
 
     fn reload_table(&mut self, i: usize) {
-        let Some(Tab::Table(tab)) = self.state.tabs.get_mut(i) else { return };
+        let Some(Tab::Table(tab)) = self.state.tabs.get(i) else { return };
+        if let Some(t) = &tab.task {
+            t.cancel(); // a newer page (sort, filter, paging) replaces the one loading
+        }
+        let conn = tab.connection.clone();
+        if !self.session.is_open(&conn) {
+            // Loaded once the connection is open (see `Then::Opened`).
+            self.open_async(&conn);
+            return;
+        }
         let params = crate::table_tab::data_params(tab);
-        match self.session.dispatch("table.data", &params) {
-            Ok(v) => match serde_json::from_value::<TablePage>(v) {
-                Ok(page) => {
-                    let rows = page.result.rows.len();
-                    let cols = page.result.columns.len();
-                    tab.page = Some(page);
-                    tab.discard();
-                    tab.error = None;
-                    tab.selected = tab.selected.filter(|(r, c)| *r < rows && *c < cols);
+        let task = self.spawn_task(vec![("table.data", params)]);
+        if let Some(Tab::Table(tab)) = self.state.tabs.get_mut(i) {
+            tab.task = Some(task);
+        }
+    }
+
+    fn table_done(tab: &mut TableTab, result: Result<Json, String>) {
+        match result.and_then(|v| serde_json::from_value::<TablePage>(v).map_err(|e| e.to_string())) {
+            Ok(page) => {
+                let rows = page.result.rows.len();
+                let cols = page.result.columns.len();
+                tab.page = Some(page);
+                tab.discard();
+                tab.error = None;
+                tab.selected = tab.selected.filter(|(r, c)| *r < rows && *c < cols);
+            }
+            Err(e) => tab.error = Some(e),
+        }
+    }
+
+    /// Start a task for a tab (query, table page, console statement).
+    fn spawn_task(&self, steps: Vec<(&'static str, Json)>) -> Task {
+        let task = Task::spawn(&self.ctx_for_jobs, &self.session, steps);
+        if self.wait_for_tasks {
+            tasks::wait(&task, std::time::Duration::from_secs(60));
+        }
+        task
+    }
+
+    fn spawn_bg(&mut self, steps: Vec<(&'static str, Json)>, then: Then) {
+        let task = self.spawn_task(steps);
+        self.bg.push((task, then));
+    }
+
+    /// Something runs in the background (opening, loading, a tab's query or page).
+    pub fn is_busy(&self) -> bool {
+        !self.bg.is_empty() || self.state.tabs.iter().any(|t| tab_task(t).is_some())
+    }
+
+    /// A connection is being opened in the background.
+    pub(crate) fn opening(&self, id: &str) -> bool {
+        self.bg.iter().any(|(_, t)| matches!(t, Then::Opened(c) if c == id))
+    }
+
+    /// Open a saved connection without blocking the window (no-op if open or opening).
+    fn open_async(&mut self, id: &str) {
+        if self.session.is_open(id) || self.opening(id) || self.session.workspace.connection(id).is_err() {
+            return;
+        }
+        self.spawn_bg(vec![("connection.open", json!({ "id": id }))], Then::Opened(id.to_string()));
+    }
+
+    /// Load a database's table details and/or object list in the background.
+    fn load_db(&mut self, conn: &str, db: &str, tables: bool, objects: bool) {
+        if !tables && !objects {
+            return;
+        }
+        if !self.session.is_open(conn) {
+            // Try again once the connection is open.
+            if tables {
+                self.tried.remove(&format!("t/{conn}/{db}"));
+            }
+            if objects {
+                self.tried.remove(&format!("d/{conn}/{db}"));
+            }
+            self.after_open.push((conn.to_string(), Action::LoadDb(conn.to_string(), db.to_string())));
+            self.open_async(conn);
+            return;
+        }
+        let params = json!({ "connection": conn, "database": db });
+        let mut steps = Vec::new();
+        if objects {
+            steps.push(("database.objects", params.clone()));
+        }
+        if tables {
+            steps.push(("database.tables", params));
+        }
+        self.spawn_bg(steps, Then::LoadedDb);
+    }
+
+    /// Hand finished tasks' results to their tabs and caches. Called at the start of each frame.
+    fn poll_tasks(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        for i in 0..self.state.tabs.len() {
+            let Some(task) = self.state.tabs.get(i).and_then(tab_task).cloned() else { continue };
+            let Some(done) = task.take() else { continue };
+            changed = true;
+            let tasks::Done { result, mut session, .. } = done;
+            let messages = std::mem::take(&mut session.messages);
+            self.session.absorb(session);
+            self.session.messages.extend(messages.iter().cloned());
+            match self.state.tabs.get_mut(i) {
+                Some(Tab::Query(q)) => {
+                    q.task = None;
+                    Self::query_done(q, result, messages);
                 }
-                Err(e) => tab.error = Some(e.to_string()),
-            },
-            Err(e) => tab.error = Some(e.to_string()),
+                Some(Tab::Table(t)) => {
+                    t.task = None;
+                    Self::table_done(t, result);
+                }
+                Some(Tab::Console(c)) => {
+                    c.task = None;
+                    Self::console_done(c, result);
+                }
+                _ => {}
+            }
+        }
+        let mut k = 0;
+        while k < self.bg.len() {
+            let Some(done) = self.bg.get(k).and_then(|(t, _)| t.take()) else {
+                k += 1;
+                continue;
+            };
+            changed = true;
+            let (_, then) = self.bg.remove(k);
+            let tasks::Done { result, session, cancelled } = done;
+            self.session.absorb(session);
+            match then {
+                Then::Opened(id) => self.opened(ctx, &id, result, cancelled),
+                Then::LoadedDb => {
+                    if let Err(e) = result
+                        && !cancelled
+                    {
+                        self.state.status = Some(e);
+                    }
+                }
+                Then::Ddl { schema, table } => {
+                    if self.state.objects.selected == Some((schema, table)) {
+                        self.state.objects.ddl = Some(match result {
+                            Ok(v) => v["ddl"].as_str().unwrap_or("").to_string(),
+                            Err(e) => format!("-- {e}"),
+                        });
+                    }
+                }
+            }
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+    }
+
+    /// A background `connection.open` finished: run what waited for it, or report why not.
+    fn opened(&mut self, ctx: &egui::Context, id: &str, result: Result<Json, String>, cancelled: bool) {
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.after_open).into_iter().partition(|(c, _)| c == id);
+        self.after_open = rest;
+        match result {
+            Ok(_) => {
+                self.state.status = None;
+                // Table tabs opened before the connection was ready.
+                let pending: Vec<usize> = (0..self.state.tabs.len())
+                    .filter(|i| matches!(self.state.tabs.get(*i), Some(Tab::Table(t)) if t.connection == id && t.page.is_none() && t.task.is_none()))
+                    .collect();
+                for i in pending {
+                    self.reload_table(i);
+                }
+                self.apply(ctx, mine.into_iter().map(|(_, a)| a).collect());
+            }
+            Err(e) => {
+                if !cancelled {
+                    self.state.status = Some(e.clone());
+                }
+                for t in &mut self.state.tabs {
+                    if let Tab::Table(t) = t
+                        && t.connection == id
+                        && t.page.is_none()
+                    {
+                        t.error = Some(e.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop (Ctrl+T): the active tab's task, or on the Objects tab everything opening/loading.
+    fn stop(&mut self) {
+        match self.state.tabs.get(self.state.active_tab).and_then(tab_task) {
+            Some(t) => t.cancel(),
+            None => {
+                for (t, _) in &self.bg {
+                    t.cancel();
+                }
+            }
         }
     }
 
@@ -924,7 +1167,8 @@ impl DbCraftApp {
                     // Restored expanded from the last run: don't auto-connect at launch.
                     state.set_open(false);
                 }
-                if !open && state.is_open() && self.tried.contains(&format!("c/{}", cfg.id)) && !self.session.is_open(&cfg.id) {
+                let opening = self.opening(&cfg.id);
+                if !open && !opening && state.is_open() && self.tried.contains(&format!("c/{}", cfg.id)) {
                     // Opening failed earlier; keep it collapsed until asked again.
                     state.set_open(false);
                 }
@@ -941,6 +1185,16 @@ impl DbCraftApp {
                     if !open {
                         if self.tried.insert(format!("c/{}", cfg.id)) {
                             actions.push(Action::Command("connection.open", json!({ "id": cfg.id })));
+                        }
+                        if opening {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.weak("Connecting…");
+                                if ui.small_button("Stop").clicked() {
+                                    actions.push(Action::StopOpening(cfg.id.clone()));
+                                }
+                            });
+                            return;
                         }
                         if ui.button("Open Connection").clicked() {
                             actions.push(Action::Command("connection.open", json!({ "id": cfg.id })));
@@ -1200,6 +1454,16 @@ impl DbCraftApp {
     }
 }
 
+/// The running task of a query, table or console tab.
+fn tab_task(t: &Tab) -> Option<&Task> {
+    match t {
+        Tab::Query(q) => q.task.as_ref(),
+        Tab::Table(t) => t.task.as_ref(),
+        Tab::Console(c) => c.task.as_ref(),
+        _ => None,
+    }
+}
+
 /// A Navicat-style toolbar button: large tinted icon above a small label, sized to its label.
 fn toolbar_button(ui: &mut Ui, glyph: &str, label: &str, color: egui::Color32, enabled: bool) -> egui::Response {
     let icon_font = egui::FontId::proportional(24.0);
@@ -1240,6 +1504,10 @@ impl eframe::App for DbCraftApp {
         }
         self.ctx_for_jobs = ctx.clone();
         self.poll_jobs();
+        self.poll_tasks(ctx);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::T)) {
+            self.stop();
+        }
         let mut actions = std::mem::take(&mut self.startup);
         egui::Panel::top("menu").frame(egui::Frame::new().fill(Tokens::TOOLBAR_BG).inner_margin(egui::Margin::symmetric(6, 2))).show(root, |ui| {
             self.menu_bar(ui, &mut actions);

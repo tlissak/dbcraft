@@ -17,7 +17,7 @@ fn temp_db(name: &str) -> String {
 #[test]
 fn create_insert_select_and_list() {
     let cfg = ConnectionConfig::sqlite("t", "t", temp_db("crud"));
-    let mut c = dbcraft_drivers::connect(&cfg).unwrap();
+    let c = dbcraft_drivers::connect(&cfg).unwrap();
     assert!(c.server_version().unwrap().starts_with("SQLite"));
 
     c.query(None, "create table people (id integer primary key, name text, score real, pic blob)").unwrap();
@@ -39,7 +39,7 @@ fn create_insert_select_and_list() {
 #[test]
 fn bad_sql_is_an_error_not_a_panic() {
     let cfg = ConnectionConfig::sqlite("t", "t", temp_db("bad"));
-    let mut c = dbcraft_drivers::connect(&cfg).unwrap();
+    let c = dbcraft_drivers::connect(&cfg).unwrap();
     assert!(c.query(None, "selec nonsense").is_err());
     assert!(c.query(None, "select * from missing_table").is_err());
     assert!(c.list_objects("no_such_db").is_err());
@@ -51,4 +51,31 @@ fn empty_path_and_unsupported_engine_are_errors() {
     let mut cfg = ConnectionConfig::sqlite("t", "t", "x.db");
     cfg.kind = dbcraft_core::DbKind::Oracle;
     assert!(dbcraft_drivers::connect(&cfg).is_err());
+}
+
+/// Stop (ROADMAP 1.1): an endless query returns `Cancelled` quickly, SQLite really stops it (the
+/// connection is usable right after), and a later query isn't interrupted by the old handler.
+#[test]
+fn stop_interrupts_an_endless_query() {
+    let cfg = ConnectionConfig::sqlite("t", "t", temp_db("stop"));
+    let c = std::sync::Arc::<dyn dbcraft_drivers::Connection>::from(dbcraft_drivers::connect(&cfg).unwrap());
+    let cancel = dbcraft_drivers::Cancel::new();
+    let (c2, k2) = (c.clone(), cancel.clone());
+    let worker = std::thread::spawn(move || {
+        dbcraft_drivers::with_cancel(&k2, || c2.query(None, "with recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n"))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let start = std::time::Instant::now();
+    cancel.cancel();
+    let r = worker.join().unwrap();
+    assert!(matches!(r, Err(dbcraft_core::Error::Cancelled)), "{r:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(2), "stopped in {:?}", start.elapsed());
+    // Every pooled connection still works (none left interrupted or busy).
+    for _ in 0..8 {
+        assert_eq!(c.query(None, "select 41 + 1").unwrap().rows[0][0], Value::Int(42));
+    }
+    // A new Stop button works on the next query.
+    let fresh = dbcraft_drivers::Cancel::new();
+    let rs = dbcraft_drivers::with_cancel(&fresh, || c.query(None, "select 7")).unwrap();
+    assert_eq!(rs.rows[0][0], Value::Int(7));
 }

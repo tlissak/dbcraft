@@ -60,8 +60,9 @@ People trust a database tool with production data; a crash can lose an unsaved q
    - Don't right-align buttons in a resizable `Panel`: they end up under the resize handle.
    - Check `lost_focus()` before calling `request_focus()` again, or Enter is swallowed.
    - Tests/shots of things running in a worker (`jobs::Job`) must `step()` until the job finishes.
+   - Build test apps with `DbCraftApp::new(..).waiting_for_tasks()` so queries, opening and page loads finish before the next frame. Only `ui_async.rs` leaves it off on purpose, to test the asynchronous path.
 7. **Secrets are sacred.** Never log passwords or full connection strings, never return passwords from `connection.list` or MCP, never commit credentials (dev docker creds excepted).
-8. **Long work runs in the background.** Anything that can take more than a moment (transfer, backup, restore, batch jobs) runs as `jobs::Job::spawn(ctx, &session, command, params)`: a forked `Session` on a worker thread, progress lines through `Session::report`, results polled in `DbCraftApp::poll_jobs`. Engine commands meant for jobs open connections on demand (`Session::conn_auto`) and are `enabled: always`.
+8. **Long work runs in the background; the UI thread never waits on a server.** Interactive work (opening, queries, table pages, object lists, DDL) runs as a `tasks::Task` over `Session::fork_shared` (shared connections, Stop with Ctrl+T, results merged back with `Session::absorb`). Long tools (transfer, backup, restore, batch jobs) run as `jobs::Job::spawn(ctx, &session, command, params)`: a forked `Session` with its own connections on a worker thread, progress lines through `Session::report`, results polled in `DbCraftApp::poll_jobs`. Engine commands meant for jobs open connections on demand (`Session::conn_auto`) and are `enabled: always`. Drivers must keep every call cancellable (go through `common::block_on`) and register a server-side stop for long statements (`common::on_cancel`).
 9. **Performance is a feature.** Results can be millions of rows: page (`table.open` limit/offset), stream where possible, never re-query per frame, and keep the UI responsive.
 
 ## 4. Picking work

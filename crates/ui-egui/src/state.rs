@@ -9,6 +9,7 @@ use dbcraft_model::BatchJob;
 
 use crate::grid::GridSel;
 use crate::jobs::Job;
+use crate::tasks::Task;
 use dbcraft_model::ObjectKind;
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,9 @@ pub struct QueryTab {
     pub save_prompt: Option<String>,
     /// Close the tab once the pending save succeeds.
     pub close_after_save: bool,
+    /// The running query (Stop cancels it).
+    #[serde(skip)]
+    pub task: Option<Task>,
 }
 
 impl QueryTab {
@@ -62,6 +66,9 @@ pub struct ConsoleTab {
     pub history: Vec<String>,
     /// Position while browsing history with Up/Down (`history.len()` = new line).
     pub history_pos: usize,
+    /// The running statement (Stop cancels it).
+    #[serde(skip)]
+    pub task: Option<Task>,
 }
 
 /// Tools › Data Transfer form.
@@ -186,6 +193,9 @@ pub struct TableTab {
     /// Row/column/block selection (copy, delete records).
     pub grid: GridSel,
     pub error: Option<String>,
+    /// The page being loaded (Stop cancels it); the last page stays on screen meanwhile.
+    #[serde(skip)]
+    pub task: Option<Task>,
 }
 
 impl TableTab {

@@ -54,7 +54,7 @@ fn check(d: &std::path::Path) -> Session {
 #[test]
 fn save_query_and_prompt_on_close() {
     let (d, s) = setup("query");
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::NewQuery {
         connection: "src".into(),
         database: Some("main".into()),
@@ -110,7 +110,7 @@ fn save_query_and_prompt_on_close() {
 #[test]
 fn console_runs_statements_like_a_cli() {
     let (_d, s) = setup("console");
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::Console { connection: "src".into(), database: None });
     let mut h = harness(app);
     h.run();
@@ -133,7 +133,7 @@ fn console_runs_statements_like_a_cli() {
 #[test]
 fn data_transfer_from_the_ui() {
     let (d, s) = setup("transfer");
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "src".into(), database: Some("main".into()) });
     app.startup(StartupAction::Tool("transfer".into()));
     let mut h = harness(app);
@@ -156,7 +156,7 @@ fn data_transfer_from_the_ui() {
 #[test]
 fn backup_and_automation_from_the_ui() {
     let (d, s) = setup("auto");
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "src".into(), database: Some("main".into()) });
     app.startup(StartupAction::Mode("backups".into()));
     let mut h = harness(app);

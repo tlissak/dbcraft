@@ -8,12 +8,16 @@ use sqlx::types::chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::types::{Decimal, JsonValue};
 use sqlx::{AssertSqlSafe, Executor, Row};
 
-use crate::common::{CONNECT_TIMEOUT, block_on, cell_str, cell_u64, columns_of, db_err, decode_row, probe, returns_rows, run_atomic};
+use crate::common::{
+    CONNECT_TIMEOUT, block_on, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, returns_rows, run_atomic, spawn,
+};
 
 /// MySQL and MariaDB (same wire protocol).
 pub struct MySqlConn {
     kind: DbKind,
     pool: MySqlPool,
+    /// For the side connection that sends `KILL QUERY` when the user presses Stop.
+    opts: MySqlConnectOptions,
 }
 
 impl MySqlConn {
@@ -29,8 +33,8 @@ impl MySqlConn {
             opts = opts.database(&cfg.database);
         }
         probe::<sqlx::MySqlConnection>(&opts)?;
-        let pool = block_on(MySqlPoolOptions::new().max_connections(2).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
-        Ok(MySqlConn { kind: cfg.kind, pool })
+        let pool = block_on(MySqlPoolOptions::new().max_connections(4).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts.clone()))?.map_err(db_err)?;
+        Ok(MySqlConn { kind: cfg.kind, pool, opts })
     }
 }
 
@@ -43,17 +47,17 @@ impl crate::Connection for MySqlConn {
         Dialect::Mysql
     }
 
-    fn server_version(&mut self) -> Result<String> {
+    fn server_version(&self) -> Result<String> {
         let row = block_on(sqlx::query("select version()").fetch_one(&self.pool))?.map_err(db_err)?;
         row.try_get::<String, _>(0).map_err(db_err)
     }
 
-    fn list_databases(&mut self) -> Result<Vec<String>> {
+    fn list_databases(&self) -> Result<Vec<String>> {
         let rows = block_on(sqlx::query("select schema_name from information_schema.schemata order by 1").fetch_all(&self.pool))?.map_err(db_err)?;
         rows.iter().map(|r| r.try_get::<String, _>(0).map_err(db_err)).collect()
     }
 
-    fn list_objects(&mut self, database: &str) -> Result<Vec<DbObject>> {
+    fn list_objects(&self, database: &str) -> Result<Vec<DbObject>> {
         let sql = "select case table_type when 'VIEW' then 'view' else 'table' end as k, table_name as n \
                    from information_schema.tables where table_schema = ? \
                    union all \
@@ -80,7 +84,7 @@ impl crate::Connection for MySqlConn {
         Ok(out)
     }
 
-    fn table_info(&mut self, database: &str) -> Result<Vec<TableInfo>> {
+    fn table_info(&self, database: &str) -> Result<Vec<TableInfo>> {
         // Casts keep the result types the same across MySQL and MariaDB versions.
         let sql = format!(
             "select cast(table_name as char), cast(table_type as char), cast(table_rows as unsigned), cast(data_length as unsigned), \
@@ -110,13 +114,13 @@ impl crate::Connection for MySqlConn {
             .collect())
     }
 
-    fn table_ddl(&mut self, database: &str, _schema: Option<&str>, table: &str) -> Result<String> {
+    fn table_ddl(&self, database: &str, _schema: Option<&str>, table: &str) -> Result<String> {
         let sql = format!("show create table {}.{}", quote_ident(Dialect::Mysql, database), quote_ident(Dialect::Mysql, table));
         let rs = self.query(None, &sql)?;
         cell_str(&rs, 0, 1).map(|s| format!("{s};")).ok_or_else(|| Error::NotFound(format!("table `{table}`")))
     }
 
-    fn execute_atomic(&mut self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
+    fn execute_atomic(&self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
         let pool = self.pool.clone();
         let mut all = Vec::with_capacity(stmts.len() + 1);
         if let Some(db) = database {
@@ -128,7 +132,7 @@ impl crate::Connection for MySqlConn {
         Ok(counts.into_iter().skip(skip).collect())
     }
 
-    fn columns(&mut self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+    fn columns(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         let db = database.map(|d| quote_literal(Dialect::Mysql, d)).unwrap_or_else(|| "database()".into());
         let rs = self.query(
             None,
@@ -157,7 +161,7 @@ impl crate::Connection for MySqlConn {
             .collect())
     }
 
-    fn primary_key(&mut self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<String>> {
+    fn primary_key(&self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<String>> {
         let schema = database.map(|d| quote_literal(Dialect::Mysql, d)).unwrap_or_else(|| "database()".into());
         let sql = format!(
             "select cast(column_name as char) from information_schema.key_column_usage \
@@ -169,15 +173,31 @@ impl crate::Connection for MySqlConn {
         Ok((0..rs.rows.len()).filter_map(|i| cell_str(&rs, i, 0)).collect())
     }
 
-    fn query(&mut self, database: Option<&str>, sql: &str) -> Result<ResultSet> {
+    fn query(&self, database: Option<&str>, sql: &str) -> Result<ResultSet> {
         let start = Instant::now();
         let mut rs = ResultSet::default();
         let sql = sql.to_string();
         let use_db = database.map(|d| format!("USE {}", quote_ident(Dialect::Mysql, d)));
         let wants_rows = returns_rows(&sql);
         let pool = self.pool.clone();
+        let cancellable = current_cancel().is_some();
+        let kill_opts = self.opts.clone();
         let out = block_on(async move {
             let mut conn = pool.acquire().await?;
+            // With a Stop button, remember the thread id so Stop can kill the statement server-side.
+            let _kill = if cancellable {
+                let id: u64 = sqlx::query_scalar("select connection_id()").fetch_one(&mut *conn).await?;
+                Some(on_cancel(move || {
+                    spawn(async move {
+                        if let Ok(mut c) = <sqlx::MySqlConnection as sqlx::Connection>::connect_with(&kill_opts).await {
+                            let _ = c.execute(sqlx::raw_sql(AssertSqlSafe(format!("KILL QUERY {id}")))).await;
+                            let _ = sqlx::Connection::close(c).await;
+                        }
+                    })
+                }))
+            } else {
+                None
+            };
             if let Some(u) = use_db {
                 conn.execute(sqlx::raw_sql(AssertSqlSafe(u))).await?;
             }

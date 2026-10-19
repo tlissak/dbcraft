@@ -22,7 +22,7 @@ fn cfg(kind: DbKind, port: u16) -> ConnectionConfig {
 }
 
 fn exercise(kind: DbKind, port: u16) {
-    let mut c = dbcraft_drivers::connect(&cfg(kind, port)).unwrap();
+    let c = dbcraft_drivers::connect(&cfg(kind, port)).unwrap();
     assert!(!c.server_version().unwrap().is_empty());
     assert!(c.list_databases().unwrap().iter().any(|d| d == "sakila_lite"));
     let objs = c.list_objects("sakila_lite").unwrap();
@@ -81,7 +81,7 @@ fn postgres_and_mysql_over_ssh() {
         let mut cfg = cfg(kind, port);
         cfg.host = host.into();
         cfg.ssh = Some(ssh.clone());
-        let mut c = dbcraft_drivers::connect(&cfg).unwrap_or_else(|e| panic!("{kind:?} over ssh: {e}"));
+        let c = dbcraft_drivers::connect(&cfg).unwrap_or_else(|e| panic!("{kind:?} over ssh: {e}"));
         assert_eq!(c.query(Some("sakila_lite"), "select count(*) from film").unwrap().rows.len(), 1);
     }
     let mut bad = cfg(DbKind::Postgres, 5432);
@@ -114,7 +114,7 @@ fn mariadb() {
 fn columns_have_generic_types() {
     use dbcraft_core::GenericType as G;
     for (kind, port, schema) in [(DbKind::Postgres, 15432, Some("public")), (DbKind::Mysql, 13306, None), (DbKind::Mariadb, 13307, None)] {
-        let mut c = dbcraft_drivers::connect(&cfg(kind, port)).unwrap();
+        let c = dbcraft_drivers::connect(&cfg(kind, port)).unwrap();
         let cols = c.columns(Some("sakila_lite"), schema, "film").unwrap();
         let by = |n: &str| cols.iter().find(|c| c.name == n).unwrap_or_else(|| panic!("{kind:?} {n}"));
         assert_eq!(by("film_id").pk, Some(1), "{kind:?}");
@@ -139,8 +139,8 @@ fn user_lifecycle() {
         if kind != DbKind::Postgres {
             admin.user = "root".into();
         }
-        let mut c = dbcraft_drivers::connect(&admin).unwrap();
-        let maria = users::server_is_mariadb(c.as_mut());
+        let c = dbcraft_drivers::connect(&admin).unwrap();
+        let maria = users::server_is_mariadb(c.as_ref());
         let (object, privs) = match kind {
             DbKind::Postgres => ("TABLE public.film", vec!["SELECT".to_string(), "UPDATE".to_string()]),
             _ => ("sakila_lite.*", vec!["SELECT".to_string(), "UPDATE".to_string()]),
@@ -148,7 +148,7 @@ fn user_lifecycle() {
         let host = (kind != DbKind::Postgres).then(|| "%".to_string());
         // Clean up a previous failed run.
         let probe = UserInfo { name: "dbc_test_user".into(), host: host.clone(), ..UserInfo::default() };
-        if let Ok(old) = users::get(c.as_mut(), "dbc_test_user", host.as_deref()) {
+        if let Ok(old) = users::get(c.as_ref(), "dbc_test_user", host.as_deref()) {
             for sql in users::drop_sql(kind, maria, &old).unwrap() {
                 let _ = c.query(None, &sql);
             }
@@ -164,10 +164,10 @@ fn user_lifecycle() {
         for sql in users::save_sql(kind, maria, None, &new, Some("S3cret!pw")).unwrap() {
             c.query(None, &sql).unwrap_or_else(|e| panic!("{kind:?} {sql}: {e}"));
         }
-        let back = users::get(c.as_mut(), "dbc_test_user", host.as_deref()).unwrap();
+        let back = users::get(c.as_ref(), "dbc_test_user", host.as_deref()).unwrap();
         let g = back.grants.iter().find(|g| g.object.replace('"', "") == object).unwrap_or_else(|| panic!("{kind:?} grants {:?}", back.grants));
         assert_eq!(g.privileges, privs, "{kind:?}");
-        assert!(users::list(c.as_mut()).unwrap().iter().any(|u| u.name == "dbc_test_user"));
+        assert!(users::list(c.as_ref()).unwrap().iter().any(|u| u.name == "dbc_test_user"));
 
         // The new user can log in with its password.
         let mut login = cfg(kind, port);
@@ -183,13 +183,56 @@ fn user_lifecycle() {
         for sql in users::save_sql(kind, maria, Some(&back), &changed, None).unwrap() {
             c.query(None, &sql).unwrap_or_else(|e| panic!("{kind:?} {sql}: {e}"));
         }
-        let back2 = users::get(c.as_mut(), "dbc_test_user", host.as_deref()).unwrap();
+        let back2 = users::get(c.as_ref(), "dbc_test_user", host.as_deref()).unwrap();
         let g = back2.grants.iter().find(|g| g.object.replace('"', "") == object).unwrap();
         assert_eq!(g.privileges, ["SELECT"], "{kind:?}");
 
         for sql in users::drop_sql(kind, maria, &back2).unwrap() {
             c.query(None, &sql).unwrap_or_else(|e| panic!("{kind:?} {sql}: {e}"));
         }
-        assert!(!users::list(c.as_mut()).unwrap().iter().any(|u| u.name == "dbc_test_user"));
+        assert!(!users::list(c.as_ref()).unwrap().iter().any(|u| u.name == "dbc_test_user"));
+    }
+}
+
+/// Stop (ROADMAP 1.1) on servers: the call returns at once, the server really stops the statement
+/// (`pg_cancel_backend` / `KILL QUERY`), and the connection keeps working.
+#[test]
+#[ignore = "needs docker compose servers"]
+fn stop_cancels_server_side() {
+    for (kind, port, sleep) in
+        [(DbKind::Postgres, 15432, "select pg_sleep(30)"), (DbKind::Mysql, 13306, "select sleep(30)"), (DbKind::Mariadb, 13307, "select sleep(30)")]
+    {
+        let c = std::sync::Arc::<dyn dbcraft_drivers::Connection>::from(dbcraft_drivers::connect(&cfg(kind, port)).unwrap());
+        let cancel = dbcraft_drivers::Cancel::new();
+        let (c2, k2, sql) = (c.clone(), cancel.clone(), sleep.to_string());
+        let worker = std::thread::spawn(move || dbcraft_drivers::with_cancel(&k2, || c2.query(Some("sakila_lite"), &sql)));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let start = std::time::Instant::now();
+        cancel.cancel();
+        let r = worker.join().unwrap();
+        assert!(matches!(r, Err(dbcraft_core::Error::Cancelled)), "{kind:?}: {r:?}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(4), "{kind:?} stopped in {:?}", start.elapsed());
+        // Nothing still sleeping on the server.
+        let busy = if kind == DbKind::Postgres {
+            "select count(*) from pg_stat_activity where query like 'select pg_sleep%' and state = 'active'"
+        } else {
+            "select count(*) from information_schema.processlist where info like 'select sleep%'"
+        };
+        let mut left = i64::MAX;
+        for _ in 0..20 {
+            left = match &c.query(None, busy).unwrap().rows[0][0] {
+                Value::Int(n) => *n,
+                Value::UInt(n) => *n as i64,
+                v => panic!("{v:?}"),
+            };
+            if left == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(left, 0, "{kind:?}: the statement is still running on the server");
+        for _ in 0..6 {
+            assert!(c.query(Some("sakila_lite"), "select 1").is_ok());
+        }
     }
 }

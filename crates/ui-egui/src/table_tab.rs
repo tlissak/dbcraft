@@ -92,6 +92,10 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
             if ui.button(format!("{} Retry", icons::ARROWS_CLOCKWISE)).clicked() {
                 actions.push(Action::ReloadTable(idx));
             }
+        } else if let Some(task) = &tab.task {
+            if crate::tasks::running_bar(ui, task, "Loading…") {
+                actions.push(Action::StopTask(idx));
+            }
         } else {
             ui.spinner();
         }
@@ -125,6 +129,11 @@ pub fn show(ui: &mut Ui, idx: usize, tab: &mut TableTab, dialect: dbcraft_sql::D
     }
     if let Some(e) = &tab.error {
         ui.colored_label(Tokens::ERROR, format!("{} {e}", icons::X));
+    }
+    if let Some(task) = &tab.task
+        && crate::tasks::running_bar(ui, task, "Loading…")
+    {
+        actions.push(Action::StopTask(idx));
     }
 
     // Bottom bar first so the grid takes the remaining space.

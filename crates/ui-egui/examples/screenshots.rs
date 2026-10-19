@@ -169,7 +169,7 @@ fn main() {
         .unwrap();
     let mysql_up = s.dispatch("connection.open", &json!({"id": "cinema"})).is_ok();
     let (conn, db, table) = if mysql_up { ("cinema", "sakila_lite", "film") } else { ("studio", "main", "films") };
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: conn.into(), database: Some(db.into()) });
     let mut h = harness(app);
     h.run_steps(6);
@@ -179,7 +179,7 @@ fn main() {
     drop(h);
 
     // 2. Table viewer: filter, sort, pending edits, a new record, a deleted record, a selected row.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::OpenTable { connection: "studio".into(), database: "main".into(), schema: None, table: "films".into() });
     let mut h = harness(app);
     h.run_steps(6);
@@ -205,7 +205,7 @@ fn main() {
     drop(h);
 
     // 3. Query editor with two result tabs and a selected row.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::NewQuery {
         connection: "studio".into(),
         database: Some("main".into()),
@@ -221,7 +221,7 @@ fn main() {
     drop(h);
 
     // 4. New Connection dialog, SSH tab.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "studio".into(), database: Some("main".into()) });
     app.startup(StartupAction::NewConnection);
     let mut h = harness(app);
@@ -246,7 +246,7 @@ fn main() {
     drop(h);
 
     // 5. Data Transfer: SQLite studio -> archive, finished with its log.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "studio".into(), database: Some("main".into()) });
     app.startup(StartupAction::Tool("transfer".into()));
     let mut h = harness(app);
@@ -275,7 +275,7 @@ fn main() {
     if let Some(j) = s.workspace.automations.get_mut(0) {
         j.schedule = Some(Schedule { frequency: "daily".into(), time: "02:00".into(), day: None });
     }
-    let mut app = DbCraftApp::new(s, None);
+    let mut app = DbCraftApp::new(s, None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "studio".into(), database: Some("main".into()) });
     app.startup(StartupAction::Tool("automation".into()));
     let mut h = harness(app);
@@ -288,7 +288,7 @@ fn main() {
     drop(h);
 
     // 7. Console.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::Console { connection: "studio".into(), database: None });
     let mut h = harness(app);
     h.run_steps(4);
@@ -305,7 +305,7 @@ fn main() {
     drop(h);
 
     // 8. User designer (PostgreSQL role, Privileges tab). Nothing is sent to a server.
-    let mut app = DbCraftApp::new(demo_session(&dir), None);
+    let mut app = DbCraftApp::new(demo_session(&dir), None).waiting_for_tasks();
     app.startup(StartupAction::Select { connection: "studio".into(), database: Some("main".into()) });
     let mut h = harness(app);
     h.run_steps(3);

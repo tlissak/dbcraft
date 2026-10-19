@@ -67,13 +67,13 @@ fn user_param(p: &Json, key: &str) -> Result<Option<UserInfo>> {
 
 fn list(s: &mut Session, p: &Json) -> Result<Json> {
     let id = str_req(p, "connection")?.to_string();
-    let v = users::list(s.conn_auto(&id)?.as_mut())?;
+    let v = users::list(s.conn_auto(&id)?.as_ref())?;
     serde_json::to_value(v).map_err(|e| Error::InvalidParam(e.to_string()))
 }
 
 fn get(s: &mut Session, p: &Json) -> Result<Json> {
     let id = str_req(p, "connection")?.to_string();
-    let u = users::get(s.conn_auto(&id)?.as_mut(), str_req(p, "name")?, str_opt(p, "host")?)?;
+    let u = users::get(s.conn_auto(&id)?.as_ref(), str_req(p, "name")?, str_opt(p, "host")?)?;
     serde_json::to_value(u).map_err(|e| Error::InvalidParam(e.to_string()))
 }
 
@@ -85,7 +85,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     let dry = p.get("dry_run").and_then(Json::as_bool).unwrap_or(false);
     let conn = s.conn_auto(&id)?;
     let kind = conn.kind();
-    let maria = users::server_is_mariadb(conn.as_mut());
+    let maria = users::server_is_mariadb(conn.as_ref());
     let sql = users::save_sql(kind, maria, original.as_ref(), &user, password)?;
     if !dry {
         for stmt in &sql {
@@ -108,8 +108,8 @@ fn delete(s: &mut Session, p: &Json) -> Result<Json> {
     let id = str_req(p, "connection")?.to_string();
     let conn = s.conn_auto(&id)?;
     let kind = conn.kind();
-    let maria = users::server_is_mariadb(conn.as_mut());
-    let user = users::get(conn.as_mut(), str_req(p, "name")?, str_opt(p, "host")?)?;
+    let maria = users::server_is_mariadb(conn.as_ref());
+    let user = users::get(conn.as_ref(), str_req(p, "name")?, str_opt(p, "host")?)?;
     let sql = users::drop_sql(kind, maria, &user)?;
     for stmt in &sql {
         conn.query(None, stmt)?;
