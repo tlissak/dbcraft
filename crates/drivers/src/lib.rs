@@ -9,6 +9,7 @@ mod common;
 mod mysql;
 mod postgres;
 mod sqlite;
+pub mod sqltext;
 mod tunnel;
 pub mod types;
 pub mod users;

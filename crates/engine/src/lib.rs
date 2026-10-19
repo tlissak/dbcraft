@@ -2,6 +2,7 @@
 //! registry. The UI, CLI, control channel and MCP server all act through [`Session::dispatch`], so
 //! anything a user can click, an agent can do.
 
+pub mod alter;
 mod automation_cmds;
 mod backup_cmds;
 mod commands;
@@ -14,6 +15,7 @@ mod params;
 mod query_cmds;
 mod saved_query_cmds;
 pub mod secrets;
+mod table_cmds;
 pub mod transfer;
 mod transfer_cmds;
 mod user_cmds;

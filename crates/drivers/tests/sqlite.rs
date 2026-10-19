@@ -106,9 +106,10 @@ fn table_schema_and_views() {
     let fk = &film.foreign_keys[0];
     assert_eq!((fk.ref_table.as_str(), fk.columns.as_slice(), fk.ref_columns.as_slice()), ("studio", &["studio_id".to_string()][..], &["id".to_string()][..]));
     assert_eq!(fk.on_delete.as_deref(), Some("CASCADE"));
-    // UNIQUE constraint: an index with a name that can be created again.
+    // UNIQUE constraint: a unique with a name that can be created again.
     let studio = c.table_schema(None, None, "studio").unwrap();
-    assert!(studio.indexes.iter().any(|i| i.unique && i.columns == ["name"] && !i.name.starts_with("sqlite_")), "{:?}", studio.indexes);
+    assert!(studio.uniques.iter().any(|u| u.columns == ["name"] && !u.name.starts_with("sqlite_")), "{:?}", studio.uniques);
+    assert!(studio.indexes.is_empty());
     let views = c.views("main").unwrap();
     assert_eq!(views.len(), 1);
     assert_eq!(views[0].definition, "select title from film");

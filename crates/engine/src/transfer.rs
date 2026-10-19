@@ -485,6 +485,12 @@ fn to_conn(
             }
         }
     }
+    // Triggers last: they must not fire while the rows are copied.
+    for t in &created {
+        for sql in ddl::index_comments(t, schema, d).into_iter().chain(ddl::create_triggers(t, &name(t), sd, d, &mut sum.warnings)) {
+            exec_ddl(run, dst.as_ref(), db, &sql, &format!("{} trigger/comment", t.name), opts, sum)?;
+        }
+    }
     for v in views {
         let sql = ddl::create_view(v, &qualify(d, db, schema, &v.name));
         // A view's SQL is the source engine's: on another engine it may not parse.
@@ -562,6 +568,12 @@ fn to_file(
             for sql in ddl::add_foreign_keys(t, &name(t), d, &ref_name) {
                 stmt(out, &sql)?;
             }
+        }
+    }
+    for t in schemas {
+        let sch = if keep_schema { t.schema.as_deref() } else { None };
+        for sql in ddl::index_comments(t, sch, d).into_iter().chain(ddl::create_triggers(t, &name(t), sd, d, &mut sum.warnings)) {
+            stmt(out, &sql)?;
         }
     }
     for v in views {

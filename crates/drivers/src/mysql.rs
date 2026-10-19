@@ -1,7 +1,8 @@
 use std::time::Instant;
 
 use dbcraft_core::{
-    ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, GenericType, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo,
+    CheckInfo, ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, GenericType, IndexInfo, Result, ResultSet, TableInfo, TableSchema, TriggerInfo,
+    Value, ViewInfo,
 };
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
@@ -148,7 +149,7 @@ impl crate::Connection for MySqlConn {
             None,
             &format!(
                 "select cast(column_name as char), cast(column_type as char), cast(is_nullable as char), cast(column_default as char), \
-                 cast(extra as char), cast(column_comment as char) \
+                 cast(extra as char), cast(column_comment as char), cast(collation_name as char) \
                  from information_schema.columns where table_schema = {db} and table_name = {} order by ordinal_position",
                 quote_literal(Dialect::Mysql, table)
             ),
@@ -173,6 +174,13 @@ impl crate::Connection for MySqlConn {
                 c.default = column_default(cell_str(&rs, i, 3), &extra, generic, self.mariadb);
                 c.auto_increment = extra.contains("auto_increment");
                 c.comment = cell_str(&rs, i, 5).filter(|s| !s.is_empty());
+                c.collation = cell_str(&rs, i, 6);
+                // `on update CURRENT_TIMESTAMP(6)` (MariaDB: `current_timestamp()`).
+                let raw_extra = cell_str(&rs, i, 4).unwrap_or_default();
+                c.on_update = extra
+                    .find("on update ")
+                    .and_then(|p| raw_extra.get(p + 10..))
+                    .map(|v| v.trim().to_ascii_uppercase().replace("CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP"));
                 Some(c)
             })
             .collect())
@@ -185,7 +193,8 @@ impl crate::Connection for MySqlConn {
         let idx = self.query(
             None,
             &format!(
-                "select cast(index_name as char), non_unique, cast(column_name as char) from information_schema.statistics \
+                "select cast(index_name as char), non_unique, cast(column_name as char), cast(index_type as char), cast(index_comment as char) \
+                 from information_schema.statistics \
                  where table_schema = {db} and table_name = {t} and index_name <> 'PRIMARY' order by index_name, seq_in_index"
             ),
         )?;
@@ -193,7 +202,20 @@ impl crate::Connection for MySqlConn {
         for i in 0..idx.rows.len() {
             let Some(name) = cell_str(&idx, i, 0) else { continue };
             if indexes.last().is_none_or(|x| x.name != name) {
-                indexes.push(IndexInfo { name, unique: cell_u64(&idx, i, 1) == Some(0), ..IndexInfo::default() });
+                let ty = cell_str(&idx, i, 3).unwrap_or_default().to_ascii_uppercase();
+                let (kind, method) = match ty.as_str() {
+                    "FULLTEXT" | "SPATIAL" => (Some(ty.clone()), None),
+                    "" => (None, None),
+                    _ => (None, Some(ty.clone())),
+                };
+                indexes.push(IndexInfo {
+                    name,
+                    unique: cell_u64(&idx, i, 1) == Some(0),
+                    kind,
+                    method,
+                    comment: cell_str(&idx, i, 4).filter(|c| !c.is_empty()),
+                    ..IndexInfo::default()
+                });
             }
             if let Some(x) = indexes.last_mut() {
                 match cell_str(&idx, i, 2) {
@@ -238,8 +260,60 @@ impl crate::Connection for MySqlConn {
                 f.ref_columns.push(cell_str(&fk, i, 4).unwrap_or_default());
             }
         }
-        let comment =
-            self.query(None, &format!("select cast(table_comment as char) from information_schema.tables where table_schema = {db} and table_name = {t}"))?;
+        let info = self.query(
+            None,
+            &format!(
+                "select cast(table_comment as char), cast(engine as char), cast(table_collation as char), cast(auto_increment as char), cast(row_format as char) \
+                 from information_schema.tables where table_schema = {db} and table_name = {t}"
+            ),
+        )?;
+        let mut options = std::collections::BTreeMap::new();
+        let table_collation = cell_str(&info, 0, 2);
+        for (key, col) in [("engine", 1), ("collation", 2), ("auto_increment", 3), ("row_format", 4)] {
+            if let Some(v) = cell_str(&info, 0, col).filter(|v| !v.is_empty()) {
+                options.insert(key.to_string(), v);
+            }
+        }
+        if let Some(charset) = table_collation.as_deref().and_then(|c| c.split('_').next()) {
+            options.insert("charset".to_string(), charset.to_string());
+        }
+        let mut columns = columns;
+        for c in &mut columns {
+            if c.collation == table_collation {
+                c.collation = None;
+            }
+        }
+        // CHECK constraints (MySQL 8.0.16+, MariaDB 10.2+); older servers simply have none.
+        let checks = self
+            .query(
+                None,
+                &format!(
+                    "select cast(cc.constraint_name as char), cast(cc.check_clause as char) from information_schema.table_constraints tc \
+                     join information_schema.check_constraints cc on cc.constraint_schema = tc.constraint_schema and cc.constraint_name = tc.constraint_name \
+                     where tc.table_schema = {db} and tc.table_name = {t} and tc.constraint_type = 'CHECK' order by 1"
+                ),
+            )
+            .map(|rs| (0..rs.rows.len()).filter_map(|i| Some(CheckInfo { name: cell_str(&rs, i, 0)?, expression: cell_str(&rs, i, 1)? })).collect())
+            .unwrap_or_default();
+        let trg = self.query(
+            None,
+            &format!(
+                "select cast(trigger_name as char), cast(action_timing as char), cast(event_manipulation as char), cast(action_statement as char), \
+                 cast(action_orientation as char) from information_schema.triggers where event_object_schema = {db} and event_object_table = {t} order by 1"
+            ),
+        )?;
+        let triggers = (0..trg.rows.len())
+            .filter_map(|i| {
+                Some(TriggerInfo {
+                    name: cell_str(&trg, i, 0)?,
+                    timing: cell_str(&trg, i, 1)?,
+                    events: vec![cell_str(&trg, i, 2)?],
+                    for_each_row: cell_str(&trg, i, 4).is_none_or(|o| o == "ROW"),
+                    condition: None,
+                    body: cell_str(&trg, i, 3)?,
+                })
+            })
+            .collect();
         Ok(TableSchema {
             schema: None,
             name: table.to_string(),
@@ -247,7 +321,11 @@ impl crate::Connection for MySqlConn {
             primary_key_name: None,
             indexes,
             foreign_keys,
-            comment: cell_str(&comment, 0, 0).filter(|c| !c.is_empty()),
+            uniques: Vec::new(),
+            checks,
+            triggers,
+            options,
+            comment: cell_str(&info, 0, 0).filter(|c| !c.is_empty()),
         })
     }
 

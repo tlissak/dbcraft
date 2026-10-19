@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo};
+use dbcraft_core::{
+    CheckInfo, ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, TriggerInfo, UniqueInfo,
+    Value, ViewInfo,
+};
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
@@ -246,8 +249,10 @@ impl crate::Connection for PgConn {
                 "select i.relname::text, ix.indisunique, pg_get_indexdef(ix.indexrelid), \
                  array_to_string(array(select a.attname from unnest(ix.indkey) with ordinality k(attnum, ord) \
                    join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = k.attnum order by k.ord), chr(31)), \
-                 (ix.indexprs is not null or ix.indpred is not null or 0 = any(ix.indkey::int2[])) \
-                 from pg_index ix join pg_class i on i.oid = ix.indexrelid where ix.indrelid = {reg} and not ix.indisprimary order by 1"
+                 (ix.indexprs is not null or ix.indpred is not null or 0 = any(ix.indkey::int2[])), am.amname::text, obj_description(i.oid, 'pg_class') \
+                 from pg_index ix join pg_class i on i.oid = ix.indexrelid join pg_am am on am.oid = i.relam \
+                 where ix.indrelid = {reg} and not ix.indisprimary \
+                 and not exists (select 1 from pg_constraint c where c.conindid = ix.indexrelid and c.contype in ('u', 'x')) order by 1"
             ),
         )?;
         let indexes = (0..idx.rows.len())
@@ -258,6 +263,9 @@ impl crate::Connection for PgConn {
                     unique: cell_bool(&idx, i, 1),
                     columns: if expression { Vec::new() } else { split_list(cell_str(&idx, i, 3)) },
                     native_ddl: if expression { cell_str(&idx, i, 2) } else { None },
+                    method: cell_str(&idx, i, 5).map(|m| m.to_ascii_uppercase()).filter(|m| m != "BTREE"),
+                    kind: None,
+                    comment: cell_str(&idx, i, 6),
                 })
             })
             .collect();
@@ -297,6 +305,45 @@ impl crate::Connection for PgConn {
                 })
             })
             .collect();
+        let cons = self.query(
+            database,
+            &format!(
+                "select c.conname::text, c.contype::text, pg_get_constraintdef(c.oid), {} \
+                 from pg_constraint c where c.conrelid = {reg} and c.contype in ('u', 'c') order by 1",
+                list("conkey", "conrelid")
+            ),
+        )?;
+        let mut uniques = Vec::new();
+        let mut checks = Vec::new();
+        for i in 0..cons.rows.len() {
+            let Some(name) = cell_str(&cons, i, 0) else { continue };
+            if cell_str(&cons, i, 1).as_deref() == Some("u") {
+                uniques.push(UniqueInfo { name, columns: split_list(cell_str(&cons, i, 3)) });
+            } else if let Some(def) = cell_str(&cons, i, 2) {
+                // `CHECK ((x > 0))` -> `(x > 0)`.
+                let expression = crate::sqltext::parens_after(&def, 0).map(|(e, _)| e).unwrap_or(def);
+                checks.push(CheckInfo { name, expression });
+            }
+        }
+        let trg = self
+            .query(database, &format!("select tgname::text, pg_get_triggerdef(oid) from pg_trigger where tgrelid = {reg} and not tgisinternal order by 1"))?;
+        let triggers = (0..trg.rows.len())
+            .filter_map(|i| {
+                let (timing, events, for_each_row, condition, body) = crate::sqltext::trigger_parts(&cell_str(&trg, i, 1)?)?;
+                Some(TriggerInfo { name: cell_str(&trg, i, 0)?, timing, events, for_each_row, condition, body })
+            })
+            .collect();
+        let opt = self.query(
+            database,
+            &format!("select t.spcname::text, c.relpersistence::text from pg_class c left join pg_tablespace t on t.oid = c.reltablespace where c.oid = {reg}"),
+        )?;
+        let mut options = std::collections::BTreeMap::new();
+        if let Some(ts) = cell_str(&opt, 0, 0) {
+            options.insert("tablespace".to_string(), ts);
+        }
+        if cell_str(&opt, 0, 1).as_deref() == Some("u") {
+            options.insert("unlogged".to_string(), "true".to_string());
+        }
         Ok(TableSchema {
             schema: own_schema,
             name: table.to_string(),
@@ -304,6 +351,10 @@ impl crate::Connection for PgConn {
             primary_key_name: cell_str(&pk_name, 0, 0),
             indexes,
             foreign_keys,
+            uniques,
+            checks,
+            triggers,
+            options,
             comment: cell_str(&owner, 0, 1),
         })
     }

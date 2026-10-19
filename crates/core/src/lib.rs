@@ -265,12 +265,29 @@ pub struct ColumnInfo {
     pub auto_increment: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Column collation when it differs from the table's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
+    /// MySQL `ON UPDATE CURRENT_TIMESTAMP`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
 }
 
 impl ColumnInfo {
     /// A plain column (no default, not generated, no comment).
     pub fn new(name: impl Into<String>, native_type: impl Into<String>, generic: GenericType, nullable: bool, pk: Option<u32>) -> Self {
-        ColumnInfo { name: name.into(), native_type: native_type.into(), generic, nullable, pk, default: None, auto_increment: false, comment: None }
+        ColumnInfo {
+            name: name.into(),
+            native_type: native_type.into(),
+            generic,
+            nullable,
+            pk,
+            default: None,
+            auto_increment: false,
+            comment: None,
+            collation: None,
+            on_update: None,
+        }
     }
 }
 
@@ -284,6 +301,48 @@ pub struct IndexInfo {
     /// on the same kind of engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_ddl: Option<String>,
+    /// Access method (`BTREE`, `HASH`, PostgreSQL `GIN`, `GIST`…).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// MySQL index type beyond unique: `FULLTEXT` or `SPATIAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// A `UNIQUE` constraint (PostgreSQL, SQLite; MySQL unique keys are indexes).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct UniqueInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+}
+
+/// A `CHECK` constraint; the expression is in the table's engine SQL.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CheckInfo {
+    pub name: String,
+    pub expression: String,
+}
+
+/// A trigger: `CREATE TRIGGER name timing events ON table [FOR EACH ROW] [WHEN (condition)] body`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TriggerInfo {
+    pub name: String,
+    /// `BEFORE`, `AFTER` or `INSTEAD OF`.
+    pub timing: String,
+    /// `INSERT`, `UPDATE`, `DELETE` (MySQL: exactly one).
+    pub events: Vec<String>,
+    #[serde(default = "yes")]
+    pub for_each_row: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// The action: MySQL/SQLite statement(s) (`BEGIN … END`), PostgreSQL `EXECUTE FUNCTION f()`.
+    pub body: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A foreign key.
@@ -317,6 +376,16 @@ pub struct TableSchema {
     pub indexes: Vec<IndexInfo>,
     #[serde(default)]
     pub foreign_keys: Vec<ForeignKeyInfo>,
+    #[serde(default)]
+    pub uniques: Vec<UniqueInfo>,
+    #[serde(default)]
+    pub checks: Vec<CheckInfo>,
+    #[serde(default)]
+    pub triggers: Vec<TriggerInfo>,
+    /// Engine options: MySQL `engine`, `charset`, `collation`, `auto_increment`, `row_format`;
+    /// PostgreSQL `tablespace`, `unlogged`; SQLite `without_rowid`, `strict`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub options: std::collections::BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
 }

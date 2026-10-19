@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo};
+use dbcraft_core::{
+    CheckInfo, ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, TriggerInfo, UniqueInfo,
+    Value, ViewInfo,
+};
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -159,7 +162,11 @@ impl crate::Connection for SqliteConn {
         let db = database.unwrap_or("main");
         let (t, d) = (quote_literal(Dialect::Sqlite, table), quote_literal(Dialect::Sqlite, db));
         let columns = self.columns(database, schema, table)?;
+        let master = format!("{}.sqlite_master", quote_ident(Dialect::Sqlite, db));
+        let create = self.query(None, &format!("select sql from {master} where type = 'table' and name = {t}"))?;
+        let create = cell_str(&create, 0, 0).unwrap_or_default();
         let mut indexes = Vec::new();
+        let mut uniques = Vec::new();
         let list =
             self.query(None, &format!("select name, \"unique\", origin, partial from pragma_index_list({t}, {d}) where origin <> 'pk' order by name"))?;
         for i in 0..list.rows.len() {
@@ -174,9 +181,13 @@ impl crate::Connection for SqliteConn {
             } else {
                 None
             };
-            // UNIQUE constraints show up as `sqlite_autoindex_*`, a name nobody may create.
-            let name = if name.starts_with("sqlite_") { format!("uq_{table}_{}", names.iter().flatten().cloned().collect::<Vec<_>>().join("_")) } else { name };
-            indexes.push(IndexInfo { name, columns: names.into_iter().flatten().collect(), unique: cell_u64(&list, i, 1) == Some(1), native_ddl });
+            let columns: Vec<String> = names.iter().flatten().cloned().collect();
+            if cell_str(&list, i, 2).as_deref() == Some("u") {
+                // A UNIQUE constraint (index `sqlite_autoindex_*`, a name nobody may create).
+                uniques.push(UniqueInfo { name: format!("uq_{table}_{}", columns.join("_")), columns });
+                continue;
+            }
+            indexes.push(IndexInfo { name, columns, unique: cell_u64(&list, i, 1) == Some(1), native_ddl, ..IndexInfo::default() });
         }
         let fk =
             self.query(None, &format!("select id, \"table\", \"from\", \"to\", on_update, on_delete from pragma_foreign_key_list({t}, {d}) order by id, seq"))?;
@@ -205,7 +216,40 @@ impl crate::Connection for SqliteConn {
                 f.ref_columns = self.primary_key(database, None, &f.ref_table)?;
             }
         }
-        Ok(TableSchema { schema: None, name: table.to_string(), columns, primary_key_name: None, indexes, foreign_keys, comment: None })
+        let checks = crate::sqltext::checks(&create)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, expression))| CheckInfo { name: name.unwrap_or_else(|| format!("ck_{table}_{}", i + 1)), expression })
+            .collect();
+        let trg = self.query(None, &format!("select name, sql from {master} where type = 'trigger' and tbl_name = {t} order by name"))?;
+        let triggers = (0..trg.rows.len())
+            .filter_map(|i| {
+                let (timing, events, for_each_row, condition, body) = crate::sqltext::trigger_parts(&cell_str(&trg, i, 1)?)?;
+                Some(TriggerInfo { name: cell_str(&trg, i, 0)?, timing, events, for_each_row, condition, body })
+            })
+            .collect();
+        let tail = create.trim_end().trim_end_matches(';').to_ascii_lowercase();
+        let tail = tail.rsplit(')').next().unwrap_or("");
+        let mut options = std::collections::BTreeMap::new();
+        if tail.contains("without rowid") {
+            options.insert("without_rowid".to_string(), "true".to_string());
+        }
+        if tail.contains("strict") {
+            options.insert("strict".to_string(), "true".to_string());
+        }
+        Ok(TableSchema {
+            schema: None,
+            name: table.to_string(),
+            columns,
+            primary_key_name: None,
+            indexes,
+            foreign_keys,
+            uniques,
+            checks,
+            triggers,
+            options,
+            comment: None,
+        })
     }
 
     fn dedicated(&self) -> Result<Box<dyn crate::Connection>> {
