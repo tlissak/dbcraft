@@ -48,6 +48,8 @@ Nothing slow runs on the UI thread.
 
 `Workspace` is saved as JSON (atomic write + rename) at `%APPDATA%\dbcraft\DbCraft\config\workspace.json`, or `DBCRAFT_WORKSPACE`. A corrupt file is reported in the status bar and left untouched; the app starts empty.
 
+Passwords: the user's workspace keeps them in the OS keychain (`engine/src/secrets.rs`, `Session::use_os_keychain`). In memory they are plain `ConnectionConfig` fields. On save, `secrets::for_file` writes changed ones to the keychain and strips all of them from the JSON. Workspaces set with `DBCRAFT_WORKSPACE` keep their mode (`password_storage`, file by default) so dev and test runs never touch the real keychain; tests use `secrets::MemoryStore`.
+
 ## Menu catalog and parity
 
 `ui-egui/src/menu_catalog.rs` lists Navicat's menu items with the command id each one maps to. An item is live when the id is registered. `cargo xtask parity` writes `docs/parity-checklist.md`; `PARITY_FLOOR` keeps it from regressing.

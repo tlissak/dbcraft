@@ -61,7 +61,11 @@ fn parse_args() -> Vec<StartupAction> {
 fn main() -> eframe::Result {
     env_logger::init();
     let startup = parse_args();
-    let (session, err) = Session::with_workspace_file(workspace_path());
+    let (mut session, err) = Session::with_workspace_file(workspace_path());
+    // The user's own workspace keeps passwords in the OS keychain; an overridden one (dev, tests,
+    // portable) keeps whatever mode its file says.
+    let keychain_warning = session.use_os_keychain(std::env::var_os("DBCRAFT_WORKSPACE").is_none());
+    let err = err.map(|e| e.to_string()).or(keychain_warning);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("DbCraft").with_inner_size([1360.0, 840.0]).with_min_inner_size([800.0, 500.0]),
         ..Default::default()
@@ -70,7 +74,7 @@ fn main() -> eframe::Result {
         "DbCraft",
         options,
         Box::new(move |_cc| {
-            let mut app = DbCraftApp::new(session, err.map(|e| e.to_string()));
+            let mut app = DbCraftApp::new(session, err);
             for a in startup {
                 app.startup(a);
             }

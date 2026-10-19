@@ -27,6 +27,8 @@ env_logger = "0.11"
 directories = "6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# OS keychain for saved passwords (Windows Credential Manager, macOS Keychain, Secret Service).
+keyring = "4"
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 sqlx = { version = "0.9", default-features = false, features = [
   "runtime-tokio", "tls-rustls-ring-webpki", "sqlite-bundled", "postgres", "mysql",

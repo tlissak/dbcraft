@@ -11,6 +11,7 @@ mod export_cmds;
 mod params;
 mod query_cmds;
 mod saved_query_cmds;
+pub mod secrets;
 pub mod transfer;
 mod transfer_cmds;
 mod user_cmds;
@@ -28,7 +29,7 @@ use dbcraft_core::{Error, Result, ResultSet, TableInfo};
 use dbcraft_drivers::Connection;
 pub use dbcraft_drivers::users::{PrivilegeCatalog, catalog as privilege_catalog};
 pub use dbcraft_drivers::{Cancel, supported_kinds, with_cancel};
-use dbcraft_model::{DbObject, Workspace};
+use dbcraft_model::{DbObject, PasswordStorage, Workspace};
 use serde_json::Value as Json;
 
 /// What [`Session::dispatch`] returns.
@@ -60,6 +61,10 @@ pub struct Session {
     pub data_dir: Option<PathBuf>,
     /// Progress for long commands; `None` = silent.
     pub progress: Option<ProgressSink>,
+    /// The OS keychain (or a test store), when this workspace keeps passwords there.
+    secrets: Option<Arc<dyn secrets::SecretStore>>,
+    /// What the keychain holds per account, so saves only write changed passwords.
+    stored: std::sync::Mutex<HashMap<String, Option<String>>>,
 }
 
 impl Session {
@@ -86,16 +91,71 @@ impl Session {
         (s, err)
     }
 
+    /// Keep this workspace's passwords in `store` (the OS keychain). With `migrate`, a workspace
+    /// that keeps them in its file moves them to the store now; otherwise only a workspace already
+    /// in keychain mode reads its passwords from it. Returns entries that could not be read.
+    pub fn attach_secrets(&mut self, store: Arc<dyn secrets::SecretStore>, migrate: bool) -> Result<Vec<String>> {
+        self.secrets = Some(store.clone());
+        match self.workspace.password_storage {
+            PasswordStorage::Keychain => {
+                let failed = secrets::load(&mut self.workspace, store.as_ref());
+                // What was just read is what the keychain holds.
+                let mut stored = self.stored.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                *stored = secrets::snapshot(&self.workspace);
+                Ok(failed)
+            }
+            PasswordStorage::File if migrate => {
+                if self.workspace.id.is_empty() {
+                    self.workspace.id = secrets::new_workspace_id();
+                }
+                self.workspace.password_storage = PasswordStorage::Keychain;
+                if let Err(e) = self.save_workspace() {
+                    // Keep the passwords where they were rather than lose them.
+                    self.workspace.password_storage = PasswordStorage::File;
+                    return Err(e);
+                }
+                Ok(Vec::new())
+            }
+            PasswordStorage::File => Ok(Vec::new()),
+        }
+    }
+
+    /// Desktop app and CLI: use the OS keychain for passwords. `migrate` moves the passwords of a
+    /// file-mode workspace into it (the user's own workspace); without it, only a workspace already
+    /// in keychain mode reads from it (dev/test workspaces keep their file). Returns a warning for
+    /// the status bar, if any.
+    pub fn use_os_keychain(&mut self, migrate: bool) -> Option<String> {
+        let Some(store) = secrets::OsKeychain::available() else {
+            return (self.workspace.password_storage == PasswordStorage::Keychain)
+                .then(|| "this workspace keeps its passwords in the OS keychain, which is not available here".to_string());
+        };
+        match self.attach_secrets(store, migrate) {
+            Ok(failed) if failed.is_empty() => None,
+            Ok(failed) => Some(format!("could not read {} saved password(s) from the OS keychain", failed.len())),
+            Err(e) => Some(format!("passwords stay in the workspace file: {e}")),
+        }
+    }
+
     pub fn save_workspace(&self) -> Result<()> {
         let Some(path) = &self.workspace_path else { return Ok(()) };
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let file = {
+            let mut stored = self.stored.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            secrets::for_file(&self.workspace, self.secrets.as_deref(), &mut stored)?
+        };
         // Write then rename so a crash mid-write never leaves a truncated file.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, self.workspace.to_json()?)?;
+        std::fs::write(&tmp, file.to_json()?)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Remove a deleted connection's passwords from the keychain.
+    pub(crate) fn forget_secrets(&self, conn: &str) -> Result<()> {
+        let mut stored = self.stored.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        secrets::forget(&self.workspace, self.secrets.as_deref(), &mut stored, conn)
     }
 
     pub fn is_open(&self, id: &str) -> bool {

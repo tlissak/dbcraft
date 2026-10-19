@@ -43,14 +43,19 @@ fn print(r: dbcraft_engine::CommandResult) -> ExitCode {
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut ws = workspace_path();
+    let mut overridden = std::env::var_os("DBCRAFT_WORKSPACE").is_some();
     if let Some(i) = args.iter().position(|a| a == "--workspace") {
         let Some(path) = args.get(i + 1).cloned() else { return usage() };
         ws = PathBuf::from(path);
+        overridden = true;
         args.drain(i..=i + 1);
     }
     let (mut session, err) = Session::with_workspace_file(ws);
     if let Some(e) = err {
         eprintln!("warning: {e}");
+    }
+    if let Some(w) = session.use_os_keychain(!overridden) {
+        eprintln!("warning: {w}");
     }
     match args.first().map(String::as_str) {
         Some("commands") => {

@@ -159,6 +159,7 @@ fn test(_: &mut Session, p: &Json) -> Result<Json> {
 fn delete(s: &mut Session, p: &Json) -> Result<Json> {
     let id = str_req(p, "id")?;
     s.workspace.remove(id)?;
+    s.forget_secrets(id)?;
     s.open.remove(id);
     s.databases.remove(id);
     s.objects.retain(|(c, _), _| c != id);

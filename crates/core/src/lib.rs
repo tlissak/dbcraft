@@ -103,7 +103,8 @@ pub struct ConnectionConfig {
     pub port: Option<u16>,
     #[serde(default)]
     pub user: String,
-    /// Plain text for now; moving secrets to the OS keychain is a tracked gap.
+    /// Kept in the OS keychain when the workspace says so (see `dbcraft_engine::secrets`); in
+    /// memory it is always the plain value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Initial database (server engines) or the file path (SQLite).

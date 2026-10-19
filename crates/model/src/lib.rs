@@ -87,9 +87,31 @@ fn yes() -> bool {
     true
 }
 
+/// Where a workspace keeps saved passwords.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PasswordStorage {
+    /// In `workspace.json` (dev/test workspaces, or no keychain on this machine).
+    #[default]
+    File,
+    /// In the OS keychain; the file holds no passwords.
+    Keychain,
+}
+
+impl PasswordStorage {
+    fn is_file(&self) -> bool {
+        *self == PasswordStorage::File
+    }
+}
+
 /// Saved state: connections, queries, batch jobs. Persisted as `workspace.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
+    /// Names this workspace's keychain entries (set when passwords move to the keychain).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "PasswordStorage::is_file")]
+    pub password_storage: PasswordStorage,
     #[serde(default)]
     pub connections: Vec<ConnectionConfig>,
     #[serde(default)]
