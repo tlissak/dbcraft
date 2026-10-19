@@ -41,6 +41,7 @@ _Last updated: 2026-10-19 (owner: Backup, Data Transfer and Structure Synchroniz
 
 | # | Feature | Status | Notes |
 |---|---|---|---|
+| 1.T0 | **Table Designer** (owner, 2026-10-19: top priority) and table actions: Design Table, New Table, Delete Table; Fields (name, type, length, decimals, not null, key, comment; default, auto increment, collation, unsigned, on update), Indexes, Foreign Keys, Uniques, Checks, Triggers, Options, Comment, SQL Preview | ✅ 2026-10-19 | `engine/src/alter.rs` (CREATE / ALTER per engine; SQLite rebuild with foreign keys off), commands `table.schema/designSql/save/delete/empty/truncate/rename/duplicate`, `ui-egui/src/designer_tab.rs` (pages per engine like Navicat), table context menu in the tree and Objects tab, confirmations. Tested on SQLite, PostgreSQL, MySQL, MariaDB (engine) and through the UI (kittest). Missing: PostgreSQL Excludes/Rules pages, partitions, Find Field, field picker for referenced columns. |
 | 1.T1 | **Backup / Restore**: fast (streamed, batched multi-row INSERTs, no full-table buffering), complete (indexes, foreign keys, defaults, auto-increment, views), compressed option, Extract SQL | 🟡 2026-10-14 | Works on all engines (see 2.11). Missing: indexes/FKs/defaults/views in the dump, streaming for big tables, compression. |
 | 1.T2 | **Data Transfer**: fast (keyset paging, multi-row INSERT batches, one transaction per batch), complete (indexes, foreign keys, defaults, auto-increment, views), profiles | 🟡 2026-10-19 | Schema model (`TableSchema` from every driver) and portable DDL (`engine/src/ddl.rs`): types (native on the same engine), defaults, auto-increment/identity (sequences reset), primary keys, indexes, foreign keys (after the data, tables in dependency order), comments, views (best effort across engines). Keyset paging, INSERTs capped at 1 MiB, one transaction per batch, reader/writer overlapped, 4 tables in parallel. Missing: checks, triggers, profiles, transfer UI options for the new switches. |
 | 1.T3 | **Structure Synchronization**: compare two databases (any engines), show differences per object, generate the deployment script, run it | ⬜ | Moved up from P3 (was 3.2). Needs a schema model (tables, columns, PK, indexes, FKs) read from each driver, a differ and DDL generation per dialect. |
@@ -86,7 +87,7 @@ _Last updated: 2026-10-19 (owner: Backup, Data Transfer and Structure Synchroniz
 
 | # | Feature | Status | Notes |
 |---|---|---|---|
-| 2.2 | Table actions: Delete, Empty, Truncate, Rename, Duplicate (structure / structure+data), Open Table (Quick) | ⬜ | |
+| 2.2 | Table actions: Delete, Empty, Truncate, Rename, Duplicate (structure / structure+data), Open Table (Quick) | 🟡 2026-10-19 | Delete, Empty, Truncate, Rename, Duplicate (structure + data via `table.duplicate {data}`) from the table context menu, with confirmations. Missing: structure-only duplicate in the menu, Open Table (Quick). |
 | 2.3 | View designer: Definition, Preview, Explain, View Builder, Beautify | ⬜ | |
 | 2.4 | Functions/Procedures: wizard, designer, Execute with Input Parameter dialog, multiple result sets | ⬜ | Listed in the tree today. |
 | 2.5 | Triggers, Events (MySQL), Indexes, Sequences, Schemas, Materialized Views (refresh), PostgreSQL Types / Domains / Extensions | ⬜ | Listed in the tree today. |
@@ -109,7 +110,7 @@ _Last updated: 2026-10-19 (owner: Backup, Data Transfer and Structure Synchroniz
 |---|---|---|---|
 | 3.1 | Data Transfer (cross-engine, objects, options, SQL file target, profiles) | ✅ 2026-10-14 | Optimisation and completeness tracked in 1.T2. Tools › Data Transfer: source/target connection + database or SQL file (choose dialect), table checklist, options (create tables, drop target first, create records, continue on error, batch size), background run with live log, Save as Batch Job. Carries columns (engine-neutral types), NOT NULL, primary keys; converts booleans, binary, datetimes per engine. Tested PG→MySQL, MySQL→PG, MariaDB→SQLite, SQLite→MariaDB, PG→SQLite. Missing: indexes, foreign keys, defaults, auto-increment, views/routines, profiles. |
 | 3.2 | Structure Synchronization | ➡️ | Moved to 1.T3. |
-| 3.10 | **Table Designer** (moved down from 2.1 by the owner): fields (insert, reorder, find), indexes, foreign keys, uniques, checks, triggers, options, comment, SQL Preview; New/Design Table | ⬜ | Reuses the schema model and DDL generation from 1.T3. |
+| 3.10 | Table Designer | ➡️ | Back to the top as 1.T0 (owner, 2026-10-19). |
 | 3.3 | Data Synchronization (key mapping, compare & preview, deploy) | ⬜ | |
 | 3.4 | Data Generation (generators: numbers, dates, names, emails, FK, regex…) | ⬜ | |
 | 3.5 | Query Builder (visual SELECT: joins, criteria, layers) and Query Parameters `[$name]` | ⬜ | |

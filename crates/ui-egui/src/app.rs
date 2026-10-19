@@ -88,6 +88,36 @@ pub enum Action {
     StopTask(usize),
     /// Give up opening this connection.
     StopOpening(String),
+    /// Design Table (`table: Some`) or New Table (`None`).
+    OpenDesigner {
+        connection: String,
+        database: String,
+        schema: Option<String>,
+        table: Option<String>,
+    },
+    DesignerSave(usize),
+    DesignerSaveAs(usize, String),
+    DesignerPreview(usize),
+    /// A table action (`table.delete`, `table.empty`, `table.truncate`, `table.duplicate`,
+    /// `table.rename`), run in the background, then the database is re-read.
+    TableOp {
+        command: &'static str,
+        params: Json,
+    },
+    /// Ask first ("Delete table `x`?"), then run the action.
+    Confirm {
+        title: String,
+        message: String,
+        button: String,
+        action: Box<Action>,
+    },
+    /// Rename Table prompt.
+    RenameTable {
+        connection: String,
+        database: String,
+        schema: Option<String>,
+        table: String,
+    },
 }
 
 /// Navigation groups under a database, in Navicat's order.
@@ -130,6 +160,8 @@ pub struct DbCraftApp {
     after_frame: Vec<crate::control::Request>,
     /// Options the theme and display formats were last set from.
     applied_options: Option<dbcraft_model::Options>,
+    confirm: Option<Confirm>,
+    rename: Option<RenamePrompt>,
     /// Tests: wait for each background task right after starting it, so a frame later its result
     /// is on screen (kittest doesn't run real time).
     wait_for_tasks: bool,
@@ -139,8 +171,24 @@ pub struct DbCraftApp {
 enum Then {
     Opened(String),
     LoadedDb,
-    Ddl { schema: Option<String>, table: String },
+    Ddl {
+        schema: Option<String>,
+        table: String,
+    },
+    /// A table action finished: re-read this database.
+    TableChanged(String, String),
 }
+
+/// A question waiting for the user (delete, empty, truncate…).
+struct Confirm {
+    title: String,
+    message: String,
+    button: String,
+    action: Action,
+}
+
+/// Rename Table prompt: (connection, database, schema, old name, new name).
+type RenamePrompt = (String, String, Option<String>, String, String);
 
 /// Things to do at launch, from the command line (handy for agents and screenshots).
 pub enum StartupAction {
@@ -186,6 +234,8 @@ impl DbCraftApp {
             bg: Vec::new(),
             after_open: Vec::new(),
             applied_options: None,
+            confirm: None,
+            rename: None,
             control: None,
             control_waits: Vec::new(),
             control_shots: Vec::new(),
@@ -549,6 +599,27 @@ impl DbCraftApp {
                         t.cancel();
                     }
                 }
+                Action::OpenDesigner { connection, database, schema, table } => self.open_designer(ctx, connection, database, schema, table),
+                Action::DesignerSave(i) => self.designer_save(i, None),
+                Action::DesignerSaveAs(i, name) => self.designer_save(i, Some(name)),
+                Action::DesignerPreview(i) => {
+                    if let Some(Tab::Designer(t)) = self.state.tabs.get(i) {
+                        let params = t.params();
+                        let r = self.session.dispatch("table.designSql", &params).map_err(|e| e.to_string());
+                        if let Some(Tab::Designer(t)) = self.state.tabs.get_mut(i) {
+                            t.preview_for = Some(t.table.clone());
+                            t.preview = Some(r.and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string())));
+                        }
+                    }
+                }
+                Action::TableOp { command, params } => {
+                    if let (Some(c), Some(d)) = (params["connection"].as_str(), params["database"].as_str()) {
+                        let then = Then::TableChanged(c.to_string(), d.to_string());
+                        self.spawn_bg(vec![(command, params.clone())], then);
+                    }
+                }
+                Action::Confirm { title, message, button, action } => self.confirm = Some(Confirm { title, message, button, action: *action }),
+                Action::RenameTable { connection, database, schema, table } => self.rename = Some((connection, database, schema, table.clone(), table)),
                 Action::StopOpening(id) => {
                     for (t, then) in &self.bg {
                         if matches!(then, Then::Opened(c) if *c == id) {
@@ -655,7 +726,12 @@ impl DbCraftApp {
         if i == 0 || i >= self.state.tabs.len() {
             return;
         }
-        if !force && self.session.workspace.options.confirm_close && matches!(self.state.tabs.get(i), Some(Tab::Query(q)) if q.dirty()) {
+        let dirty = match self.state.tabs.get(i) {
+            Some(Tab::Query(q)) => q.dirty(),
+            Some(Tab::Designer(t)) => t.dirty() && t.loaded,
+            _ => false,
+        };
+        if !force && self.session.workspace.options.confirm_close && dirty {
             self.state.confirm_close = Some(i);
             self.state.active_tab = i;
             return;
@@ -1101,6 +1177,30 @@ impl DbCraftApp {
                     c.task = None;
                     Self::console_done(c, result);
                 }
+                Some(Tab::Designer(t)) => {
+                    t.task = None;
+                    let saving = t.loaded;
+                    match result.and_then(|v| serde_json::from_value::<dbcraft_core::TableSchema>(v).map_err(|e| e.to_string())) {
+                        Ok(schema) => {
+                            t.set_saved(schema);
+                            t.error = None;
+                            t.status = saving.then(|| "Saved".to_string());
+                            let (conn, db, close) = (t.connection.clone(), t.database.clone(), t.close_after_save);
+                            if saving && let Some(db) = db {
+                                self.table_changed(&conn, &db);
+                            }
+                            if close {
+                                self.close_tab(i, true);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            t.error = Some(e);
+                            t.status = None;
+                            t.close_after_save = false;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1122,6 +1222,13 @@ impl DbCraftApp {
                     {
                         self.state.status = Some(e);
                     }
+                }
+                Then::TableChanged(conn, db) => {
+                    match result {
+                        Err(e) if !cancelled => self.state.status = Some(e),
+                        _ => self.state.status = None,
+                    }
+                    self.table_changed(&conn, &db);
                 }
                 Then::Ddl { schema, table } => {
                     if self.state.objects.selected == Some((schema, table)) {
@@ -1166,6 +1273,129 @@ impl DbCraftApp {
                         t.error = Some(e.clone());
                     }
                 }
+            }
+        }
+    }
+
+    /// Design Table / New Table: one designer tab per table.
+    fn open_designer(&mut self, ctx: &egui::Context, connection: String, database: String, schema: Option<String>, table: Option<String>) {
+        if let Some(name) = &table
+            && let Some(i) = self.state.tabs.iter().position(
+                |t| matches!(t, Tab::Designer(d) if d.connection == connection && d.database.as_deref() == Some(&database) && d.original.as_ref().map(|o| &o.name) == Some(name)),
+            )
+        {
+            self.state.active_tab = i;
+            return;
+        }
+        let dialect = crate::query_tab::dialect_of(&self.session, Some(&connection));
+        let tab = match &table {
+            Some(name) => crate::designer_tab::DesignerTab::design(connection.clone(), Some(database.clone()), schema.clone(), name),
+            None => crate::designer_tab::DesignerTab::new_table(connection.clone(), Some(database.clone()), schema.clone(), dialect),
+        };
+        self.state.tabs.push(Tab::Designer(Box::new(tab)));
+        let i = self.state.tabs.len() - 1;
+        self.state.active_tab = i;
+        if let Some(name) = table {
+            let mut steps = Vec::new();
+            if !self.session.is_open(&connection) {
+                steps.push(("connection.open", json!({ "id": connection })));
+            }
+            steps.push(("table.schema", json!({ "connection": connection, "database": database, "schema": schema, "table": name })));
+            let task = self.spawn_task(steps);
+            if let Some(Tab::Designer(t)) = self.state.tabs.get_mut(i) {
+                t.task = Some(task);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// Save the designer: `table.save`, then re-read the table so the tab shows what the server has.
+    fn designer_save(&mut self, i: usize, name: Option<String>) {
+        let Some(Tab::Designer(t)) = self.state.tabs.get_mut(i) else { return };
+        if let Some(n) = name {
+            t.table.name = n;
+            t.name_prompt = None;
+        }
+        if t.table.name.trim().is_empty() {
+            t.name_prompt = Some(String::new());
+            return;
+        }
+        if !t.dirty() {
+            t.status = Some("No changes".into());
+            if t.close_after_save {
+                self.close_tab(i, true);
+            }
+            return;
+        }
+        t.error = None;
+        t.status = None;
+        let reload = json!({ "connection": t.connection, "database": t.database, "schema": t.schema, "table": t.table.name });
+        let steps = vec![("table.save", t.params()), ("table.schema", reload)];
+        let task = self.spawn_task(steps);
+        if let Some(Tab::Designer(t)) = self.state.tabs.get_mut(i) {
+            t.task = Some(task);
+        }
+    }
+
+    /// A table was created, changed or removed: re-read its database (tree and Objects tab).
+    fn table_changed(&mut self, conn: &str, db: &str) {
+        let key = (conn.to_string(), db.to_string());
+        self.session.tables.remove(&key);
+        self.session.objects.remove(&key);
+        self.tried.remove(&format!("t/{conn}/{db}"));
+        self.tried.remove(&format!("d/{conn}/{db}"));
+        if self.session.is_open(conn) {
+            self.tried.insert(format!("t/{conn}/{db}"));
+            self.tried.insert(format!("d/{conn}/{db}"));
+            self.load_db(conn, db, true, true);
+        }
+    }
+
+    /// The generic confirmation and the Rename Table prompt.
+    fn confirm_and_rename_windows(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if let Some(c) = &self.confirm {
+            let (mut open, mut go, mut cancel) = (true, false, false);
+            egui::Window::new(c.title.clone())
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.content_rect().center())
+                .show(ctx, |ui| {
+                    ui.label(&c.message);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        go = ui.button(RichText::new(&c.button).strong().color(Tokens::error())).clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                });
+            if go {
+                if let Some(c) = self.confirm.take() {
+                    actions.push(c.action);
+                }
+            } else if cancel || !open {
+                self.confirm = None;
+            }
+        }
+        if let Some((conn, db, schema, old, new)) = &mut self.rename {
+            let (mut open, mut ok) = (true, false);
+            egui::Window::new("Rename Table")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.content_rect().center())
+                .show(ctx, |ui| {
+                    ui.label(format!("New name for `{old}`"));
+                    let r = ui.add(egui::TextEdit::singleline(new).desired_width(260.0));
+                    ok = (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) || ui.button(RichText::new("OK").strong()).clicked();
+                });
+            if ok && !new.trim().is_empty() && new != old {
+                let params = json!({ "connection": conn, "database": db, "schema": schema, "table": old, "new_name": new.trim() });
+                actions.push(Action::TableOp { command: "table.rename", params });
+                self.rename = None;
+            } else if !open {
+                self.rename = None;
             }
         }
     }
@@ -1465,9 +1695,20 @@ impl DbCraftApp {
                         let r = ui.selectable_label(false, job);
                         let schema = if kind == DbKind::Postgres { o.schema.clone() } else { None };
                         if r.double_clicked() && matches!(o.kind, ObjectKind::Table | ObjectKind::View) {
-                            actions.push(Action::OpenTable { connection: conn.to_string(), database: db.to_string(), schema, table: o.name.clone() });
+                            actions.push(Action::OpenTable {
+                                connection: conn.to_string(),
+                                database: db.to_string(),
+                                schema: schema.clone(),
+                                table: o.name.clone(),
+                            });
                         } else if r.clicked() {
                             actions.push(Action::Select(Selection { connection: conn.to_string(), database: Some(db.to_string()), group: o.kind }));
+                        }
+                        if o.kind == ObjectKind::Table {
+                            r.context_menu(|ui| {
+                                let tr = crate::table_menu::TableRef { connection: conn, database: db, schema: schema.as_deref(), name: &o.name };
+                                crate::table_menu::items(ui, &tr, actions);
+                            });
                         }
                     }
                 });
@@ -1554,6 +1795,7 @@ impl DbCraftApp {
                             (RichText::new(egui_phosphor::regular::ROBOT).color(egui::Color32::from_rgb(0xd4, 0x8a, 0x17)), "Automation".into(), false)
                         }
                         Tab::User(u) => (RichText::new(egui_phosphor::regular::USER).color(Tokens::text()), u.title(), false),
+                        Tab::Designer(t) => (RichText::new(icons::PENCIL_SIMPLE).color(Tokens::accent()), t.title(), t.dirty() && t.loaded),
                     };
                     let active = i == self.state.active_tab;
                     let fill = if active { Tokens::bg() } else { Tokens::tab_inactive() };
@@ -1598,6 +1840,16 @@ impl DbCraftApp {
             Tab::Console(c) => crate::console_tab::show(ui, idx, c, &self.session, actions),
             Tab::Transfer(f) => crate::transfer_tab::show(ui, idx, f, &self.session, actions),
             Tab::Automation(v) => crate::automation_tab::show(ui, idx, v, &self.session, actions),
+            Tab::Designer(t) => {
+                let dialect = crate::query_tab::dialect_of(&self.session, Some(&t.connection));
+                let tables: Vec<String> = t
+                    .database
+                    .as_ref()
+                    .and_then(|db| self.session.tables.get(&(t.connection.clone(), db.clone())))
+                    .map(|v| v.iter().filter(|x| x.kind == "table").map(|x| x.name.clone()).collect())
+                    .unwrap_or_default();
+                crate::designer_tab::show(ui, idx, t, &crate::designer_tab::Ctx { dialect, tables: &tables }, actions)
+            }
             Tab::User(u) => {
                 let users = match &self.state.objects.users {
                     Some(Ok(l)) => l.clone(),
@@ -1634,6 +1886,7 @@ fn tab_task(t: &Tab) -> Option<&Task> {
         Tab::Query(q) => q.task.as_ref(),
         Tab::Table(t) => t.task.as_ref(),
         Tab::Console(c) => c.task.as_ref(),
+        Tab::Designer(d) => d.task.as_ref(),
         _ => None,
     }
 }
@@ -1765,6 +2018,7 @@ impl eframe::App for DbCraftApp {
         if let Some(i) = self.state.confirm_close {
             let title = match self.state.tabs.get(i) {
                 Some(Tab::Query(q)) => q.title.clone(),
+                Some(Tab::Designer(t)) => t.title(),
                 _ => String::new(),
             };
             let mut open = true;
@@ -1778,10 +2032,17 @@ impl eframe::App for DbCraftApp {
                     ui.label(format!("Do you want to save changes to `{title}`?"));
                     ui.horizontal(|ui| {
                         if ui.button(RichText::new("Save").strong()).clicked() {
-                            if let Some(Tab::Query(q)) = self.state.tabs.get_mut(i) {
-                                q.close_after_save = true;
+                            match self.state.tabs.get_mut(i) {
+                                Some(Tab::Query(q)) => {
+                                    q.close_after_save = true;
+                                    actions.push(Action::SaveQuery(i));
+                                }
+                                Some(Tab::Designer(t)) => {
+                                    t.close_after_save = true;
+                                    actions.push(Action::DesignerSave(i));
+                                }
+                                _ => {}
                             }
-                            actions.push(Action::SaveQuery(i));
                             self.state.confirm_close = None;
                         }
                         if ui.button("Don't Save").clicked() {
@@ -1797,6 +2058,7 @@ impl eframe::App for DbCraftApp {
                 self.state.confirm_close = None;
             }
         }
+        self.confirm_and_rename_windows(ctx, &mut actions);
         if self.state.show_about {
             egui::Window::new("About DbCraft").open(&mut self.state.show_about).collapsible(false).show(ctx, |ui| {
                 ui.heading("DbCraft");

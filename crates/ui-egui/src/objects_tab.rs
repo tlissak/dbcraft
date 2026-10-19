@@ -67,12 +67,26 @@ pub fn show(ui: &mut Ui, session: &Session, sel: Option<&Selection>, view: &mut 
             {
                 actions.push(Action::OpenTable { connection: sel.connection.clone(), database: db.clone(), schema: t.schema.clone(), table: t.name.clone() });
             }
-            for (icon, label) in [
-                (icons::PENCIL_SIMPLE, format!("Design {group_word}")),
-                (icons::PLUS, format!("New {group_word}")),
-                (icons::TRASH, format!("Delete {group_word}")),
-            ] {
-                ui.add_enabled(false, egui::Button::new(format!("{icon} {label}"))).on_disabled_hover_text("Coming soon (ROADMAP.md)");
+            let tables = sel.group != ObjectKind::View;
+            let picked = selected_info.filter(|_| tables).map(|t| crate::table_menu::TableRef {
+                connection: &sel.connection,
+                database: db,
+                schema: t.schema.as_deref(),
+                name: &t.name,
+            });
+            if ui.add_enabled(picked.is_some(), egui::Button::new(format!("{} Design {group_word}", icons::PENCIL_SIMPLE))).clicked()
+                && let Some(t) = &picked
+            {
+                actions.push(crate::table_menu::design_action(t));
+            }
+            if ui.add_enabled(tables, egui::Button::new(format!("{} New {group_word}", icons::PLUS))).clicked() {
+                let schema = if cfg.kind == DbKind::Postgres { Some("public") } else { None };
+                actions.push(crate::table_menu::new_table_action(&sel.connection, db, schema));
+            }
+            if ui.add_enabled(picked.is_some(), egui::Button::new(format!("{} Delete {group_word}", icons::TRASH))).clicked()
+                && let Some(t) = &picked
+            {
+                actions.push(crate::table_menu::delete_action(t));
             }
             ui.separator();
             ui.add_enabled(false, egui::Button::new(format!("{} Import Wizard", icons::DOWNLOAD_SIMPLE))).on_disabled_hover_text("Coming soon (ROADMAP.md)");
@@ -157,13 +171,18 @@ pub fn show(ui: &mut Ui, session: &Session, sel: Option<&Selection>, view: &mut 
                         open = Some(t);
                     }
                     r.context_menu(|ui| {
-                        if ui.button(format!("{} Open {group_word}", icons::TABLE)).clicked() {
-                            open = Some(t);
-                            ui.close();
-                        }
-                        if ui.button(format!("{} Copy Name", icons::CODE)).clicked() {
-                            ui.ctx().copy_text(t.name.clone());
-                            ui.close();
+                        if t.kind == "view" {
+                            if ui.button(format!("{} Open {group_word}", icons::TABLE)).clicked() {
+                                open = Some(t);
+                                ui.close();
+                            }
+                            if ui.button(format!("{} Copy Name", icons::CODE)).clicked() {
+                                ui.ctx().copy_text(t.name.clone());
+                                ui.close();
+                            }
+                        } else {
+                            let tr = crate::table_menu::TableRef { connection: &sel.connection, database: db, schema: t.schema.as_deref(), name: &t.name };
+                            crate::table_menu::items(ui, &tr, actions);
                         }
                     });
                 });

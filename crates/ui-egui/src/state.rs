@@ -227,6 +227,8 @@ pub enum Tab {
     Transfer(Box<TransferForm>),
     Automation(Box<AutomationView>),
     User(Box<UserTab>),
+    /// Table Designer (Design Table / New Table).
+    Designer(Box<crate::designer_tab::DesignerTab>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
