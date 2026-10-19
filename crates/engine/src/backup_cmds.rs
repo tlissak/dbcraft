@@ -121,7 +121,8 @@ fn create(s: &mut Session, p: &Json) -> Result<Json> {
     }
     s.report(&format!("Backup {db} -> {}", path.display()));
     let tmp = path.with_extension("sql.part");
-    let opts = Options { create_tables: true, drop_existing: true, create_records: true, continue_on_error: false, batch_size: 500 };
+    // Views come with the new backup format (restoring a view defined by another user needs privileges).
+    let opts = Options { drop_existing: true, ..Options::default() };
     let mut file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
     let mut info =
         BackupInfo { created: now.format("%Y-%m-%d %H:%M:%S").to_string(), comment, dialect: format!("{dialect:?}").to_lowercase(), ..BackupInfo::default() };

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo, Value};
+use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo};
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
@@ -11,7 +11,8 @@ use sqlx::types::{Decimal, JsonValue, Uuid};
 use sqlx::{AssertSqlSafe, Row};
 
 use crate::common::{
-    CONNECT_TIMEOUT, block_on, cell_bool, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, returns_rows, run_atomic, spawn,
+    CONNECT_TIMEOUT, block_on, cell_bool, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, returns_rows, run_atomic,
+    spawn, split_list,
 };
 
 /// Connections per database pool: a query tab, a table tab and the tree can work at once.
@@ -23,6 +24,7 @@ pub struct PgConn {
     base: PgConnectOptions,
     default_db: String,
     pools: Mutex<HashMap<String, PgPool>>,
+    pool_size: u32,
 }
 
 impl PgConn {
@@ -35,7 +37,7 @@ impl PgConn {
             base = base.password(pw);
         }
         let default_db = if cfg.database.is_empty() { "postgres".to_string() } else { cfg.database.clone() };
-        let conn = PgConn { base, default_db: default_db.clone(), pools: Mutex::new(HashMap::new()) };
+        let conn = PgConn { base, default_db: default_db.clone(), pools: Mutex::new(HashMap::new()), pool_size: POOL_SIZE };
         conn.pool(&default_db)?;
         Ok(conn)
     }
@@ -48,7 +50,7 @@ impl PgConn {
         // second pool for the same database, and the first one stored wins.
         let opts = self.base.clone().database(db);
         probe::<sqlx::PgConnection>(&opts)?;
-        let pool = block_on(PgPoolOptions::new().max_connections(POOL_SIZE).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
+        let pool = block_on(PgPoolOptions::new().max_connections(self.pool_size).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts))?.map_err(db_err)?;
         Ok(self.pools.lock().unwrap_or_else(PoisonError::into_inner).entry(db.to_string()).or_insert(pool).clone())
     }
 }
@@ -196,8 +198,10 @@ impl crate::Connection for PgConn {
             database,
             &format!(
                 "select a.attname::text, format_type(a.atttypid, a.atttypmod), not a.attnotnull, \
-                 (select array_position(i.indkey::int2[], a.attnum) + 1 from pg_index i where i.indrelid = a.attrelid and i.indisprimary) \
-                 from pg_attribute a where a.attrelid = {reg} and a.attnum > 0 and not a.attisdropped order by a.attnum"
+                 (select array_position(i.indkey::int2[], a.attnum) + 1 from pg_index i where i.indrelid = a.attrelid and i.indisprimary), \
+                 pg_get_expr(d.adbin, d.adrelid), a.attidentity::text, col_description(a.attrelid, a.attnum) \
+                 from pg_attribute a left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum \
+                 where a.attrelid = {reg} and a.attnum > 0 and not a.attisdropped order by a.attnum"
             ),
         )?;
         if rs.rows.is_empty() {
@@ -206,12 +210,123 @@ impl crate::Connection for PgConn {
         Ok((0..rs.rows.len())
             .filter_map(|i| {
                 let native = cell_str(&rs, i, 1).unwrap_or_default();
-                Some(ColumnInfo {
-                    name: cell_str(&rs, i, 0)?,
-                    generic: crate::types::from_postgres(&native),
-                    native_type: native,
-                    nullable: cell_bool(&rs, i, 2),
-                    pk: cell_u64(&rs, i, 3).and_then(|p| u32::try_from(p).ok()),
+                let mut c = ColumnInfo::new(
+                    cell_str(&rs, i, 0)?,
+                    native.clone(),
+                    crate::types::from_postgres(&native),
+                    cell_bool(&rs, i, 2),
+                    cell_u64(&rs, i, 3).and_then(|p| u32::try_from(p).ok()),
+                );
+                let default = cell_str(&rs, i, 4);
+                let identity = cell_str(&rs, i, 5).is_some_and(|x| x == "a" || x == "d");
+                // serial/bigserial: the default is the sequence; the column is simply auto-increment.
+                let serial = default.as_deref().is_some_and(|d| d.starts_with("nextval("));
+                c.auto_increment = identity || serial;
+                c.default = default.filter(|_| !serial);
+                c.comment = cell_str(&rs, i, 6);
+                Some(c)
+            })
+            .collect())
+    }
+
+    fn table_schema(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<TableSchema> {
+        let reg = format!("to_regclass({})", quote_literal(Dialect::Postgres, &qualified(schema, table)));
+        let columns = self.columns(database, schema, table)?;
+        let owner = self.query(
+            database,
+            &format!(
+                "select n.nspname::text, obj_description(c.oid, 'pg_class') from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = {reg}"
+            ),
+        )?;
+        let own_schema = cell_str(&owner, 0, 0);
+        let pk_name = self.query(database, &format!("select conname::text from pg_constraint where conrelid = {reg} and contype = 'p'"))?;
+        let idx = self.query(
+            database,
+            &format!(
+                "select i.relname::text, ix.indisunique, pg_get_indexdef(ix.indexrelid), \
+                 array_to_string(array(select a.attname from unnest(ix.indkey) with ordinality k(attnum, ord) \
+                   join pg_attribute a on a.attrelid = ix.indrelid and a.attnum = k.attnum order by k.ord), chr(31)), \
+                 (ix.indexprs is not null or ix.indpred is not null or 0 = any(ix.indkey::int2[])) \
+                 from pg_index ix join pg_class i on i.oid = ix.indexrelid where ix.indrelid = {reg} and not ix.indisprimary order by 1"
+            ),
+        )?;
+        let indexes = (0..idx.rows.len())
+            .filter_map(|i| {
+                let expression = cell_bool(&idx, i, 4);
+                Some(IndexInfo {
+                    name: cell_str(&idx, i, 0)?,
+                    unique: cell_bool(&idx, i, 1),
+                    columns: if expression { Vec::new() } else { split_list(cell_str(&idx, i, 3)) },
+                    native_ddl: if expression { cell_str(&idx, i, 2) } else { None },
+                })
+            })
+            .collect();
+        let list = |key: &str, rel: &str| {
+            format!(
+                "array_to_string(array(select a.attname from unnest(c.{key}) with ordinality k(n, o) \
+                 join pg_attribute a on a.attrelid = c.{rel} and a.attnum = k.n order by k.o), chr(31))"
+            )
+        };
+        let fk = self.query(
+            database,
+            &format!(
+                "select c.conname::text, {}, rn.nspname::text, r.relname::text, {}, c.confdeltype::text, c.confupdtype::text \
+                 from pg_constraint c join pg_class r on r.oid = c.confrelid join pg_namespace rn on rn.oid = r.relnamespace \
+                 where c.conrelid = {reg} and c.contype = 'f' order by 1",
+                list("conkey", "conrelid"),
+                list("confkey", "confrelid")
+            ),
+        )?;
+        let action = |code: Option<String>| match code.as_deref() {
+            Some("c") => Some("CASCADE".to_string()),
+            Some("n") => Some("SET NULL".to_string()),
+            Some("d") => Some("SET DEFAULT".to_string()),
+            Some("r") => Some("RESTRICT".to_string()),
+            _ => None,
+        };
+        let foreign_keys = (0..fk.rows.len())
+            .filter_map(|i| {
+                Some(ForeignKeyInfo {
+                    name: cell_str(&fk, i, 0)?,
+                    columns: split_list(cell_str(&fk, i, 1)),
+                    ref_schema: cell_str(&fk, i, 2).filter(|s| Some(s) != own_schema.as_ref()),
+                    ref_table: cell_str(&fk, i, 3)?,
+                    ref_columns: split_list(cell_str(&fk, i, 4)),
+                    on_delete: action(cell_str(&fk, i, 5)),
+                    on_update: action(cell_str(&fk, i, 6)),
+                })
+            })
+            .collect();
+        Ok(TableSchema {
+            schema: own_schema,
+            name: table.to_string(),
+            columns,
+            primary_key_name: cell_str(&pk_name, 0, 0),
+            indexes,
+            foreign_keys,
+            comment: cell_str(&owner, 0, 1),
+        })
+    }
+
+    fn dedicated(&self) -> Result<Box<dyn crate::Connection>> {
+        // One connection per database it touches (PostgreSQL sessions belong to one database).
+        let conn = PgConn { base: self.base.clone(), default_db: self.default_db.clone(), pools: Mutex::new(HashMap::new()), pool_size: 1 };
+        conn.pool(&conn.default_db)?;
+        Ok(Box::new(conn))
+    }
+
+    fn views(&self, database: &str) -> Result<Vec<ViewInfo>> {
+        let rs = self.query(
+            Some(database),
+            "select n.nspname::text, c.relname::text, pg_get_viewdef(c.oid, true) from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relkind = 'v' and n.nspname not in ('pg_catalog', 'information_schema') order by 1, 2",
+        )?;
+        Ok((0..rs.rows.len())
+            .filter_map(|i| {
+                Some(ViewInfo {
+                    schema: cell_str(&rs, i, 0),
+                    name: cell_str(&rs, i, 1)?,
+                    definition: cell_str(&rs, i, 2)?.trim().trim_end_matches(';').trim().to_string(),
                 })
             })
             .collect())

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo, Value};
+use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo};
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -10,6 +10,7 @@ use crate::common::{CONNECT_TIMEOUT, block_on, cell_str, cell_u64, columns_of, c
 
 pub struct SqliteConn {
     pool: SqlitePool,
+    opts: SqliteConnectOptions,
 }
 
 impl SqliteConn {
@@ -21,9 +22,13 @@ impl SqliteConn {
         // Several connections let the tree read while a long query runs; an in-memory database
         // exists per connection, so it gets exactly one.
         let memory = cfg.database.trim() == ":memory:" || cfg.database.contains("mode=memory");
+        Self::with_pool(opts, if memory { 1 } else { 4 })
+    }
+
+    fn with_pool(opts: SqliteConnectOptions, size: u32) -> Result<Self> {
         let pool = block_on(
             SqlitePoolOptions::new()
-                .max_connections(if memory { 1 } else { 4 })
+                .max_connections(size)
                 // A Stop handler from an earlier query must not interrupt the next one.
                 .before_acquire(|conn, _| {
                     Box::pin(async move {
@@ -32,10 +37,10 @@ impl SqliteConn {
                     })
                 })
                 .acquire_timeout(CONNECT_TIMEOUT)
-                .connect_with(opts),
+                .connect_with(opts.clone()),
         )?
         .map_err(db_err)?;
-        Ok(SqliteConn { pool })
+        Ok(SqliteConn { pool, opts })
     }
 }
 
@@ -117,7 +122,7 @@ impl crate::Connection for SqliteConn {
 
     fn columns(&self, database: Option<&str>, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         let sql = format!(
-            "select name, type, \"notnull\", pk from pragma_table_info({}, {}) order by cid",
+            "select name, type, \"notnull\", pk, dflt_value from pragma_table_info({}, {}) order by cid",
             quote_literal(Dialect::Sqlite, table),
             quote_literal(Dialect::Sqlite, database.unwrap_or("main"))
         );
@@ -125,17 +130,93 @@ impl crate::Connection for SqliteConn {
         if rs.rows.is_empty() {
             return Err(Error::NotFound(format!("table `{table}`")));
         }
-        Ok((0..rs.rows.len())
+        let mut cols: Vec<ColumnInfo> = (0..rs.rows.len())
             .filter_map(|i| {
                 let native = cell_str(&rs, i, 1).unwrap_or_default();
-                Some(ColumnInfo {
-                    name: cell_str(&rs, i, 0)?,
-                    generic: crate::types::from_sqlite(&native),
-                    native_type: native,
-                    nullable: cell_u64(&rs, i, 2) != Some(1),
-                    pk: cell_u64(&rs, i, 3).filter(|p| *p > 0).and_then(|p| u32::try_from(p).ok()),
-                })
+                let mut c = ColumnInfo::new(
+                    cell_str(&rs, i, 0)?,
+                    native.clone(),
+                    crate::types::from_sqlite(&native),
+                    cell_u64(&rs, i, 2) != Some(1),
+                    cell_u64(&rs, i, 3).filter(|p| *p > 0).and_then(|p| u32::try_from(p).ok()),
+                );
+                c.default = cell_str(&rs, i, 4);
+                Some(c)
             })
+            .collect();
+        // A single-column `INTEGER PRIMARY KEY` is the rowid: SQLite numbers it by itself.
+        let pk: Vec<usize> = cols.iter().enumerate().filter(|(_, c)| c.pk.is_some()).map(|(i, _)| i).collect();
+        if let [only] = pk.as_slice()
+            && let Some(c) = cols.get_mut(*only)
+            && c.native_type.eq_ignore_ascii_case("integer")
+        {
+            c.auto_increment = true;
+        }
+        Ok(cols)
+    }
+
+    fn table_schema(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<TableSchema> {
+        let db = database.unwrap_or("main");
+        let (t, d) = (quote_literal(Dialect::Sqlite, table), quote_literal(Dialect::Sqlite, db));
+        let columns = self.columns(database, schema, table)?;
+        let mut indexes = Vec::new();
+        let list =
+            self.query(None, &format!("select name, \"unique\", origin, partial from pragma_index_list({t}, {d}) where origin <> 'pk' order by name"))?;
+        for i in 0..list.rows.len() {
+            let Some(name) = cell_str(&list, i, 0) else { continue };
+            let cols = self.query(None, &format!("select name from pragma_index_info({}, {d}) order by seqno", quote_literal(Dialect::Sqlite, &name)))?;
+            let names: Vec<Option<String>> = (0..cols.rows.len()).map(|r| cell_str(&cols, r, 0)).collect();
+            let expression = names.iter().any(Option::is_none) || cell_u64(&list, i, 3) == Some(1);
+            let native_ddl = if expression {
+                let master = format!("{}.sqlite_master", quote_ident(Dialect::Sqlite, db));
+                let ddl = self.query(None, &format!("select sql from {master} where type = 'index' and name = {}", quote_literal(Dialect::Sqlite, &name)))?;
+                cell_str(&ddl, 0, 0)
+            } else {
+                None
+            };
+            // UNIQUE constraints show up as `sqlite_autoindex_*`, a name nobody may create.
+            let name = if name.starts_with("sqlite_") { format!("uq_{table}_{}", names.iter().flatten().cloned().collect::<Vec<_>>().join("_")) } else { name };
+            indexes.push(IndexInfo { name, columns: names.into_iter().flatten().collect(), unique: cell_u64(&list, i, 1) == Some(1), native_ddl });
+        }
+        let fk =
+            self.query(None, &format!("select id, \"table\", \"from\", \"to\", on_update, on_delete from pragma_foreign_key_list({t}, {d}) order by id, seq"))?;
+        let mut foreign_keys: Vec<ForeignKeyInfo> = Vec::new();
+        let mut last_id = None;
+        for i in 0..fk.rows.len() {
+            let id = cell_u64(&fk, i, 0);
+            if id != last_id || foreign_keys.is_empty() {
+                last_id = id;
+                foreign_keys.push(ForeignKeyInfo {
+                    name: format!("fk_{table}_{}", id.unwrap_or(0)),
+                    ref_table: cell_str(&fk, i, 1).unwrap_or_default(),
+                    on_update: cell_str(&fk, i, 4).filter(|a| a != "NO ACTION"),
+                    on_delete: cell_str(&fk, i, 5).filter(|a| a != "NO ACTION"),
+                    ..ForeignKeyInfo::default()
+                });
+            }
+            if let Some(f) = foreign_keys.last_mut() {
+                f.columns.push(cell_str(&fk, i, 2).unwrap_or_default());
+                // `to` is NULL when the FK names the parent's primary key implicitly.
+                f.ref_columns.extend(cell_str(&fk, i, 3));
+            }
+        }
+        for f in &mut foreign_keys {
+            if f.ref_columns.is_empty() {
+                f.ref_columns = self.primary_key(database, None, &f.ref_table)?;
+            }
+        }
+        Ok(TableSchema { schema: None, name: table.to_string(), columns, primary_key_name: None, indexes, foreign_keys, comment: None })
+    }
+
+    fn dedicated(&self) -> Result<Box<dyn crate::Connection>> {
+        Ok(Box::new(Self::with_pool(self.opts.clone(), 1)?))
+    }
+
+    fn views(&self, database: &str) -> Result<Vec<ViewInfo>> {
+        let master = format!("{}.sqlite_master", quote_ident(Dialect::Sqlite, database));
+        let rs = self.query(None, &format!("select name, sql from {master} where type = 'view' order by name"))?;
+        Ok((0..rs.rows.len())
+            .filter_map(|i| Some(ViewInfo { schema: None, name: cell_str(&rs, i, 0)?, definition: crate::common::view_select(&cell_str(&rs, i, 1)?)? }))
             .collect())
     }
 

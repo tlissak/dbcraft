@@ -191,6 +191,30 @@ pub fn cell_bool(rs: &ResultSet, row: usize, col: usize) -> bool {
     }
 }
 
+/// The `SELECT` of a `CREATE VIEW name [(cols)] AS select` statement (SQLite keeps only the
+/// whole statement).
+pub fn view_select(create: &str) -> Option<String> {
+    let lower = create.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = lower.find("view")?;
+    while let Some(rel) = lower.get(from..)?.find("as") {
+        let at = from + rel;
+        let before = at.checked_sub(1).and_then(|i| bytes.get(i)).copied().unwrap_or(b' ');
+        let after = bytes.get(at + 2).copied().unwrap_or(b' ');
+        let edge = |b: u8| b.is_ascii_whitespace() || b == b'(' || b == b')' || b == b'"' || b == b'`' || b == b']';
+        if edge(before) && (after.is_ascii_whitespace() || after == b'(') {
+            return create.get(at + 2..).map(|s| s.trim().trim_end_matches(';').trim().to_string());
+        }
+        from = at + 2;
+    }
+    None
+}
+
+/// Split a `chr(31)`-joined list from a catalog query.
+pub fn split_list(s: Option<String>) -> Vec<String> {
+    s.map(|s| s.split('\u{1f}').filter(|p| !p.is_empty()).map(str::to_string).collect()).unwrap_or_default()
+}
+
 /// Whether a statement yields rows (prepared + fetch) or only a count (raw execute).
 pub fn returns_rows(sql: &str) -> bool {
     let mut s = sql.trim_start();
@@ -309,6 +333,15 @@ mod tests {
         with_cancel(&c, || drop(on_cancel(|| panic!("must not run"))));
         c.cancel();
         assert!(current_cancel().is_none());
+    }
+
+    #[test]
+    fn finds_the_select_of_a_view() {
+        assert_eq!(view_select("CREATE VIEW v AS select 1").as_deref(), Some("select 1"));
+        assert_eq!(view_select("create view \"has as\" (a, b) as\n  select x as a, y from t;").as_deref(), Some("select x as a, y from t"));
+        assert_eq!(view_select("CREATE VIEW [v]AS(select 1)").as_deref(), Some("(select 1)"));
+        assert_eq!(view_select("CREATE VIEW basket AS SELECT 1").as_deref(), Some("SELECT 1"));
+        assert_eq!(view_select("nonsense"), None);
     }
 
     #[test]

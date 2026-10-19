@@ -255,6 +255,88 @@ pub struct ColumnInfo {
     pub nullable: bool,
     /// Position in the primary key (1-based), if part of it.
     pub pk: Option<u32>,
+    /// Default expression as the engine reports it (`'x'`, `0`, `CURRENT_TIMESTAMP`), if any. An
+    /// auto-increment column's implicit default (`nextval(...)`) is not repeated here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// The server fills it (MySQL `AUTO_INCREMENT`, PostgreSQL identity/serial, SQLite
+    /// `INTEGER PRIMARY KEY`).
+    #[serde(default)]
+    pub auto_increment: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+impl ColumnInfo {
+    /// A plain column (no default, not generated, no comment).
+    pub fn new(name: impl Into<String>, native_type: impl Into<String>, generic: GenericType, nullable: bool, pk: Option<u32>) -> Self {
+        ColumnInfo { name: name.into(), native_type: native_type.into(), generic, nullable, pk, default: None, auto_increment: false, comment: None }
+    }
+}
+
+/// A secondary index (the primary key is described by the columns' `pk`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    /// Expression or partial index: the engine's own `CREATE INDEX` text. It can only be recreated
+    /// on the same kind of engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_ddl: Option<String>,
+}
+
+/// A foreign key.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    /// `CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT` (`None`: NO ACTION).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_update: Option<String>,
+}
+
+/// Everything needed to recreate or compare a table: Data Transfer, Backup, Structure
+/// Synchronization.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TableSchema {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub name: String,
+    pub columns: Vec<ColumnInfo>,
+    /// Name of the primary key constraint, where the engine has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_name: Option<String>,
+    #[serde(default)]
+    pub indexes: Vec<IndexInfo>,
+    #[serde(default)]
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+impl TableSchema {
+    /// Primary key columns in key order.
+    pub fn primary_key(&self) -> Vec<&ColumnInfo> {
+        let mut pk: Vec<&ColumnInfo> = self.columns.iter().filter(|c| c.pk.is_some()).collect();
+        pk.sort_by_key(|c| c.pk);
+        pk
+    }
+}
+
+/// A view and its `SELECT` (in the source engine's SQL).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ViewInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub name: String,
+    pub definition: String,
 }
 
 /// A grant: privileges on one object (`*.*`, `db.*`, `db.table`; PostgreSQL `DATABASE x`, `TABLE s.t`).

@@ -79,3 +79,37 @@ fn stop_interrupts_an_endless_query() {
     let rs = dbcraft_drivers::with_cancel(&fresh, || c.query(None, "select 7")).unwrap();
     assert_eq!(rs.rows[0][0], Value::Int(7));
 }
+
+#[test]
+fn table_schema_and_views() {
+    let cfg = ConnectionConfig::sqlite("t", "t", temp_db("schema"));
+    let c = dbcraft_drivers::connect(&cfg).unwrap();
+    for sql in [
+        "create table studio (id integer primary key, name text not null unique)",
+        "create table film (id integer primary key autoincrement, title text not null default 'untitled', added text default current_timestamp, \
+         studio_id int references studio on delete cascade, code text)",
+        "create index film_title on film (title, id)",
+        "create index film_lower on film (lower(code))",
+        "create view titles as select title from film",
+    ] {
+        c.query(None, sql).unwrap();
+    }
+    let film = c.table_schema(None, None, "film").unwrap();
+    let id = &film.columns[0];
+    assert!(id.auto_increment && id.pk == Some(1));
+    assert_eq!(film.columns[1].default.as_deref(), Some("'untitled'"));
+    assert_eq!(film.columns[2].default.as_deref().map(str::to_ascii_lowercase).as_deref(), Some("current_timestamp"));
+    let plain = film.indexes.iter().find(|i| i.name == "film_title").unwrap();
+    assert_eq!((plain.columns.as_slice(), plain.unique, plain.native_ddl.is_none()), (&["title".to_string(), "id".to_string()][..], false, true));
+    let expr = film.indexes.iter().find(|i| i.name == "film_lower").unwrap();
+    assert!(expr.native_ddl.as_deref().unwrap_or("").contains("lower(code)"), "{expr:?}");
+    let fk = &film.foreign_keys[0];
+    assert_eq!((fk.ref_table.as_str(), fk.columns.as_slice(), fk.ref_columns.as_slice()), ("studio", &["studio_id".to_string()][..], &["id".to_string()][..]));
+    assert_eq!(fk.on_delete.as_deref(), Some("CASCADE"));
+    // UNIQUE constraint: an index with a name that can be created again.
+    let studio = c.table_schema(None, None, "studio").unwrap();
+    assert!(studio.indexes.iter().any(|i| i.unique && i.columns == ["name"] && !i.name.starts_with("sqlite_")), "{:?}", studio.indexes);
+    let views = c.views("main").unwrap();
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0].definition, "select title from film");
+}

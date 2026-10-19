@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo, Value};
+use dbcraft_core::{
+    ColumnInfo, ConnectionConfig, DbKind, Error, ForeignKeyInfo, GenericType, IndexInfo, Result, ResultSet, TableInfo, TableSchema, Value, ViewInfo,
+};
 use dbcraft_model::{DbObject, ObjectKind};
 use dbcraft_sql::{Dialect, quote_ident, quote_literal};
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions};
@@ -18,6 +20,8 @@ pub struct MySqlConn {
     pool: MySqlPool,
     /// For the side connection that sends `KILL QUERY` when the user presses Stop.
     opts: MySqlConnectOptions,
+    /// MariaDB reports column defaults as SQL expressions, MySQL as bare values.
+    mariadb: bool,
 }
 
 impl MySqlConn {
@@ -33,8 +37,14 @@ impl MySqlConn {
             opts = opts.database(&cfg.database);
         }
         probe::<sqlx::MySqlConnection>(&opts)?;
-        let pool = block_on(MySqlPoolOptions::new().max_connections(4).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts.clone()))?.map_err(db_err)?;
-        Ok(MySqlConn { kind: cfg.kind, pool, opts })
+        Self::with_pool(cfg.kind, opts, 4)
+    }
+
+    fn with_pool(kind: DbKind, opts: MySqlConnectOptions, size: u32) -> Result<Self> {
+        let pool = block_on(MySqlPoolOptions::new().max_connections(size).acquire_timeout(CONNECT_TIMEOUT).connect_with(opts.clone()))?.map_err(db_err)?;
+        let version: String = block_on(sqlx::query_scalar("select version()").fetch_one(&pool))?.map_err(db_err)?;
+        let mariadb = kind == DbKind::Mariadb || version.to_ascii_lowercase().contains("mariadb");
+        Ok(MySqlConn { kind, pool, opts, mariadb })
     }
 }
 
@@ -137,7 +147,8 @@ impl crate::Connection for MySqlConn {
         let rs = self.query(
             None,
             &format!(
-                "select cast(column_name as char), cast(column_type as char), cast(is_nullable as char) \
+                "select cast(column_name as char), cast(column_type as char), cast(is_nullable as char), cast(column_default as char), \
+                 cast(extra as char), cast(column_comment as char) \
                  from information_schema.columns where table_schema = {db} and table_name = {} order by ordinal_position",
                 quote_literal(Dialect::Mysql, table)
             ),
@@ -150,14 +161,112 @@ impl crate::Connection for MySqlConn {
             .filter_map(|i| {
                 let name = cell_str(&rs, i, 0)?;
                 let native = cell_str(&rs, i, 1).unwrap_or_default();
-                Some(ColumnInfo {
-                    pk: pk.iter().position(|k| *k == name).and_then(|p| u32::try_from(p + 1).ok()),
-                    name,
-                    generic: crate::types::from_mysql(&native),
-                    native_type: native,
-                    nullable: cell_str(&rs, i, 2).as_deref() == Some("YES"),
-                })
+                let generic = crate::types::from_mysql(&native);
+                let extra = cell_str(&rs, i, 4).unwrap_or_default().to_ascii_lowercase();
+                let mut c = ColumnInfo::new(
+                    name.clone(),
+                    native,
+                    generic,
+                    cell_str(&rs, i, 2).as_deref() == Some("YES"),
+                    pk.iter().position(|k| *k == name).and_then(|p| u32::try_from(p + 1).ok()),
+                );
+                c.default = column_default(cell_str(&rs, i, 3), &extra, generic, self.mariadb);
+                c.auto_increment = extra.contains("auto_increment");
+                c.comment = cell_str(&rs, i, 5).filter(|s| !s.is_empty());
+                Some(c)
             })
+            .collect())
+    }
+
+    fn table_schema(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<TableSchema> {
+        let db = database.map(|d| quote_literal(Dialect::Mysql, d)).unwrap_or_else(|| "database()".into());
+        let t = quote_literal(Dialect::Mysql, table);
+        let columns = self.columns(database, schema, table)?;
+        let idx = self.query(
+            None,
+            &format!(
+                "select cast(index_name as char), non_unique, cast(column_name as char) from information_schema.statistics \
+                 where table_schema = {db} and table_name = {t} and index_name <> 'PRIMARY' order by index_name, seq_in_index"
+            ),
+        )?;
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        for i in 0..idx.rows.len() {
+            let Some(name) = cell_str(&idx, i, 0) else { continue };
+            if indexes.last().is_none_or(|x| x.name != name) {
+                indexes.push(IndexInfo { name, unique: cell_u64(&idx, i, 1) == Some(0), ..IndexInfo::default() });
+            }
+            if let Some(x) = indexes.last_mut() {
+                match cell_str(&idx, i, 2) {
+                    Some(c) => x.columns.push(c),
+                    // A functional index part (MySQL 8): not portable, so not carried over.
+                    None => x.columns.clear(),
+                }
+            }
+        }
+        indexes.retain(|x| !x.columns.is_empty());
+        let fk = self.query(
+            None,
+            &format!(
+                "select cast(k.constraint_name as char), cast(k.column_name as char), cast(k.referenced_table_schema as char), \
+                 cast(k.referenced_table_name as char), cast(k.referenced_column_name as char), cast(r.update_rule as char), cast(r.delete_rule as char) \
+                 from information_schema.key_column_usage k join information_schema.referential_constraints r \
+                 on r.constraint_schema = k.constraint_schema and r.constraint_name = k.constraint_name and r.table_name = k.table_name \
+                 where k.table_schema = {db} and k.table_name = {t} and k.referenced_table_name is not null \
+                 order by k.constraint_name, k.ordinal_position"
+            ),
+        )?;
+        let own_db = match database {
+            Some(d) => Some(d.to_string()),
+            None => cell_str(&self.query(None, "select database()")?, 0, 0),
+        };
+        let mut foreign_keys: Vec<ForeignKeyInfo> = Vec::new();
+        for i in 0..fk.rows.len() {
+            let Some(name) = cell_str(&fk, i, 0) else { continue };
+            if foreign_keys.last().is_none_or(|f| f.name != name) {
+                let action = |c| cell_str(&fk, i, c).filter(|a| a != "NO ACTION");
+                foreign_keys.push(ForeignKeyInfo {
+                    name,
+                    ref_schema: cell_str(&fk, i, 2).filter(|s| Some(s) != own_db.as_ref()),
+                    ref_table: cell_str(&fk, i, 3).unwrap_or_default(),
+                    on_update: action(5),
+                    on_delete: action(6),
+                    ..ForeignKeyInfo::default()
+                });
+            }
+            if let Some(f) = foreign_keys.last_mut() {
+                f.columns.push(cell_str(&fk, i, 1).unwrap_or_default());
+                f.ref_columns.push(cell_str(&fk, i, 4).unwrap_or_default());
+            }
+        }
+        let comment =
+            self.query(None, &format!("select cast(table_comment as char) from information_schema.tables where table_schema = {db} and table_name = {t}"))?;
+        Ok(TableSchema {
+            schema: None,
+            name: table.to_string(),
+            columns,
+            primary_key_name: None,
+            indexes,
+            foreign_keys,
+            comment: cell_str(&comment, 0, 0).filter(|c| !c.is_empty()),
+        })
+    }
+
+    fn dedicated(&self) -> Result<Box<dyn crate::Connection>> {
+        Ok(Box::new(Self::with_pool(self.kind, self.opts.clone(), 1)?))
+    }
+
+    fn views(&self, database: &str) -> Result<Vec<ViewInfo>> {
+        let rs = self.query(
+            None,
+            &format!(
+                "select cast(table_name as char), cast(view_definition as char) from information_schema.views where table_schema = {} order by table_name",
+                quote_literal(Dialect::Mysql, database)
+            ),
+        )?;
+        // MySQL qualifies every column with the database; drop it so the view works elsewhere.
+        let prefix = format!("{}.", quote_ident(Dialect::Mysql, database));
+        Ok((0..rs.rows.len())
+            .filter_map(|i| Some(ViewInfo { schema: None, name: cell_str(&rs, i, 0)?, definition: cell_str(&rs, i, 1)?.replace(&prefix, "") }))
             .collect())
     }
 
@@ -238,5 +347,51 @@ impl crate::Connection for MySqlConn {
         }
         rs.elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(rs)
+    }
+}
+
+/// A column default as SQL. MariaDB already reports SQL (`'abc'`, `current_timestamp()`, `NULL`);
+/// MySQL reports bare values and flags expressions with `DEFAULT_GENERATED`.
+fn column_default(raw: Option<String>, extra: &str, generic: GenericType, mariadb: bool) -> Option<String> {
+    let raw = raw?;
+    if mariadb {
+        return (raw != "NULL").then_some(raw);
+    }
+    let numeric = matches!(
+        generic,
+        GenericType::SmallInt
+            | GenericType::Integer
+            | GenericType::BigInt
+            | GenericType::Decimal { .. }
+            | GenericType::Float
+            | GenericType::Double
+            | GenericType::Bool
+    );
+    if extra.contains("default_generated") {
+        let upper = raw.to_ascii_uppercase();
+        // Keywords stand alone; other expressions need parentheses in a DEFAULT clause.
+        Some(if upper.starts_with("CURRENT_") || upper.starts_with("NOW") || upper.starts_with("LOCALTIME") { raw } else { format!("({raw})") })
+    } else if numeric && raw.parse::<f64>().is_ok() {
+        Some(raw)
+    } else {
+        Some(quote_literal(Dialect::Mysql, &raw))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_become_sql() {
+        let g = GenericType::Varchar { len: 10 };
+        assert_eq!(column_default(Some("abc".into()), "", g, false).as_deref(), Some("'abc'"));
+        assert_eq!(column_default(Some("it's".into()), "", g, false).as_deref(), Some("'it''s'"));
+        assert_eq!(column_default(Some("0".into()), "", GenericType::Integer, false).as_deref(), Some("0"));
+        assert_eq!(column_default(Some("CURRENT_TIMESTAMP".into()), "default_generated", GenericType::DateTime, false).as_deref(), Some("CURRENT_TIMESTAMP"));
+        assert_eq!(column_default(Some("uuid()".into()), "default_generated", g, false).as_deref(), Some("(uuid())"));
+        assert_eq!(column_default(None, "", g, false), None);
+        assert_eq!(column_default(Some("'abc'".into()), "", g, true).as_deref(), Some("'abc'"));
+        assert_eq!(column_default(Some("NULL".into()), "", g, true), None);
     }
 }

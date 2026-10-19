@@ -236,3 +236,37 @@ fn stop_cancels_server_side() {
         }
     }
 }
+
+/// The schema model (Transfer, Backup, Structure Sync): defaults, auto-increment, keys, foreign
+/// keys and views as each server reports them.
+#[test]
+#[ignore = "needs docker compose servers"]
+fn table_schema_and_views() {
+    for (kind, port) in [(DbKind::Postgres, 15432), (DbKind::Mysql, 13306), (DbKind::Mariadb, 13307)] {
+        let c = dbcraft_drivers::connect(&cfg(kind, port)).unwrap();
+        let film = c.table_schema(Some("sakila_lite"), None, "film").unwrap();
+        let id = film.columns.iter().find(|c| c.name == "film_id").unwrap();
+        assert!(id.auto_increment && id.pk == Some(1) && id.default.is_none(), "{kind:?}: {id:?}");
+        let added = film.columns.iter().find(|c| c.name == "added_at").unwrap();
+        let d = added.default.as_deref().unwrap_or("").to_ascii_lowercase();
+        assert!(d.contains("now") || d.contains("current_timestamp"), "{kind:?}: {added:?}");
+        let fa = c.table_schema(Some("sakila_lite"), None, "film_actor").unwrap();
+        assert_eq!(fa.primary_key().iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["actor_id", "film_id"], "{kind:?}");
+        let mut refs: Vec<(String, Vec<String>, Vec<String>)> =
+            fa.foreign_keys.iter().map(|f| (f.ref_table.clone(), f.columns.clone(), f.ref_columns.clone())).collect();
+        refs.sort();
+        assert_eq!(
+            refs,
+            [
+                ("actor".to_string(), vec!["actor_id".to_string()], vec!["actor_id".to_string()]),
+                ("film".into(), vec!["film_id".into()], vec!["film_id".into()])
+            ],
+            "{kind:?}"
+        );
+        assert!(fa.foreign_keys.iter().all(|f| f.ref_schema.is_none()), "same schema/database is implicit");
+        let views = c.views("sakila_lite").unwrap();
+        let v = views.iter().find(|v| v.name == "film_list").unwrap_or_else(|| panic!("{kind:?}: {views:?}"));
+        assert!(v.definition.to_ascii_lowercase().contains("select"), "{kind:?}: {v:?}");
+        assert!(!v.definition.contains("`sakila_lite`."), "database prefix stripped: {v:?}");
+    }
+}

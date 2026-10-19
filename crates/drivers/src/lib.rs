@@ -13,9 +13,9 @@ mod tunnel;
 pub mod types;
 pub mod users;
 
-pub use common::{Cancel, with_cancel};
+pub use common::{Cancel, current_cancel, with_cancel};
 
-use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo};
+use dbcraft_core::{ColumnInfo, ConnectionConfig, DbKind, Error, Result, ResultSet, TableInfo, TableSchema, ViewInfo};
 use dbcraft_model::DbObject;
 use dbcraft_sql::Dialect;
 
@@ -36,8 +36,17 @@ pub trait Connection: Send + Sync {
     fn table_ddl(&self, database: &str, schema: Option<&str>, table: &str) -> Result<String>;
     /// Primary key columns in key order (empty when the table has none).
     fn primary_key(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<String>>;
-    /// Columns with native and engine-neutral types, nullability and key position.
+    /// Columns with native and engine-neutral types, nullability, key position, default and
+    /// auto-increment.
     fn columns(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>>;
+    /// Columns, primary key, indexes and foreign keys: what Transfer, Backup and Structure
+    /// Synchronization need to recreate or compare a table.
+    fn table_schema(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<TableSchema>;
+    /// Views with their `SELECT` text.
+    fn views(&self, database: &str) -> Result<Vec<ViewInfo>>;
+    /// A connection of its own: one server session, so `BEGIN`, `LOCK TABLES` and the queries after
+    /// them share it (consistent backups). The shared connection uses a pool instead.
+    fn dedicated(&self) -> Result<Box<dyn Connection>>;
     /// Run statements in one transaction on one connection. A statement paired with `Some(n)` must
     /// affect exactly `n` rows; otherwise, or on any error, everything is rolled back.
     fn execute_atomic(&self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>>;
@@ -55,7 +64,7 @@ pub fn connect(cfg: &ConnectionConfig) -> Result<Box<dyn Connection>> {
             let db_port = cfg.port.or(kind.default_port()).ok_or_else(|| Error::InvalidParam("port is required".into()))?;
             let tunnel = tunnel::open(ssh, db_host, db_port)?;
             let local = ConnectionConfig { host: "127.0.0.1".into(), port: Some(tunnel.local_port), ssh: None, ..cfg.clone() };
-            Ok(Box::new(Tunneled { inner: connect_direct(&local)?, _tunnel: tunnel }))
+            Ok(Box::new(Tunneled { inner: connect_direct(&local)?, _tunnel: std::sync::Arc::new(tunnel) }))
         }
         (None, _) => connect_direct(cfg),
     }
@@ -78,7 +87,7 @@ pub fn supported_kinds() -> &'static [DbKind] {
 /// A connection that owns its SSH tunnel. Field order matters: the pool drops before the tunnel.
 struct Tunneled {
     inner: Box<dyn Connection>,
-    _tunnel: tunnel::Tunnel,
+    _tunnel: std::sync::Arc<tunnel::Tunnel>,
 }
 
 impl Connection for Tunneled {
@@ -108,6 +117,16 @@ impl Connection for Tunneled {
     }
     fn columns(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         self.inner.columns(database, schema, table)
+    }
+    fn table_schema(&self, database: Option<&str>, schema: Option<&str>, table: &str) -> Result<TableSchema> {
+        self.inner.table_schema(database, schema, table)
+    }
+    fn views(&self, database: &str) -> Result<Vec<ViewInfo>> {
+        self.inner.views(database)
+    }
+    fn dedicated(&self) -> Result<Box<dyn Connection>> {
+        // Same tunnel, its own session behind it.
+        Ok(Box::new(Tunneled { inner: self.inner.dedicated()?, _tunnel: self._tunnel.clone() }))
     }
     fn execute_atomic(&self, database: Option<&str>, stmts: &[(String, Option<u64>)]) -> Result<Vec<u64>> {
         self.inner.execute_atomic(database, stmts)
