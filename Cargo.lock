@@ -1181,7 +1181,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dbcraft"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-engine",
  "dbcraft-ui-egui",
@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-automation"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-engine",
  "serde_json",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-automation",
  "dbcraft-engine",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-drivers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-core",
  "dbcraft-model",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dbcraft-core",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-core",
  "serde",
@@ -1259,11 +1259,11 @@ dependencies = [
 
 [[package]]
 name = "dbcraft-sql"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "dbcraft-ui-egui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dbcraft-core",
@@ -6545,7 +6545,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbcraft-ui-egui",
  "serde_json",
