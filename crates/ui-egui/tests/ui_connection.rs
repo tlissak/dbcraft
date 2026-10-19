@@ -52,3 +52,32 @@ fn ssh_tab_and_test_connection() {
     h.step();
     assert!(h.query_by_label_contains("refused").is_some() || h.query_by_label_contains("10061").is_some() || h.query_by_label_contains("error").is_some());
 }
+
+/// eframe restores the tree's expanded nodes from the last run; an expanded connection node must
+/// not connect by itself at launch. Expanding it afterwards (a user action) still connects.
+#[test]
+fn no_auto_connect_at_launch() {
+    let d = std::env::temp_dir().join(format!("dbcraft-uiconn-launch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let (mut s, _) = Session::with_workspace_file(d.join("workspace.json"));
+    s.dispatch("connection.save", &serde_json::json!({"id": "lite", "kind": "sqlite", "name": "lite", "database": d.join("lite.db").to_string_lossy()}))
+        .unwrap();
+    let app = DbCraftApp::new(s, None);
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|cc| {
+        // What persistence restores when the node was expanded last time.
+        let id = egui::Id::new(("conn", "lite"));
+        let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(&cc.egui_ctx, id, true);
+        st.set_open(true);
+        st.store(&cc.egui_ctx);
+        app
+    });
+    h.run();
+    assert!(!h.state().session.is_open("lite"), "no connection at launch");
+
+    h.get_by_label_contains("lite").click_secondary();
+    h.run();
+    h.get_by_label("Open Connection").click();
+    h.run();
+    assert!(h.state().session.is_open("lite"), "Open Connection connects");
+}

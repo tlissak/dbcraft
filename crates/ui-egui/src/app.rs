@@ -107,6 +107,10 @@ pub struct DbCraftApp {
     startup: Vec<Action>,
     /// For starting background jobs from code without a `ctx` at hand.
     pub(crate) ctx_for_jobs: egui::Context,
+    /// Set after the first tree frame. eframe persists which tree nodes were expanded, and an
+    /// expanded connection node opens its connection; at launch we collapse them instead, so
+    /// connecting is always a manual action.
+    tree_started: bool,
 }
 
 /// Things to do at launch, from the command line (handy for agents and screenshots).
@@ -142,7 +146,7 @@ pub enum StartupAction {
 impl DbCraftApp {
     pub fn new(session: Session, startup_error: Option<String>) -> Self {
         let state = UiState { status: startup_error, ..UiState::default() };
-        DbCraftApp { session, state, tried: HashSet::new(), themed: false, startup: Vec::new(), ctx_for_jobs: egui::Context::default() }
+        DbCraftApp { session, state, tried: HashSet::new(), themed: false, startup: Vec::new(), ctx_for_jobs: egui::Context::default(), tree_started: false }
     }
 
     pub fn startup(&mut self, a: StartupAction) {
@@ -916,6 +920,10 @@ impl DbCraftApp {
                 let open = self.session.is_open(&cfg.id);
                 let id = egui::Id::new(("conn", &cfg.id));
                 let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                if !open && !self.tree_started {
+                    // Restored expanded from the last run: don't auto-connect at launch.
+                    state.set_open(false);
+                }
                 if !open && state.is_open() && self.tried.contains(&format!("c/{}", cfg.id)) && !self.session.is_open(&cfg.id) {
                     // Opening failed earlier; keep it collapsed until asked again.
                     state.set_open(false);
@@ -990,6 +998,7 @@ impl DbCraftApp {
                     }
                 });
             }
+            self.tree_started = true;
             if self.session.workspace.connections.is_empty() {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
