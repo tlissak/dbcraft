@@ -41,7 +41,7 @@ impl TransferForm {
     }
 }
 
-fn conn_db_pickers(ui: &mut Ui, id: &str, session: &Session, conn: &mut Option<String>, db: &mut Option<String>) -> bool {
+pub(crate) fn conn_db_pickers(ui: &mut Ui, id: &str, session: &Session, conn: &mut Option<String>, db: &mut Option<String>) -> bool {
     let mut changed = false;
     let name = conn.as_ref().and_then(|c| session.workspace.connection(c).ok()).map(|c| c.name.clone()).unwrap_or_else(|| "(choose)".into());
     ui.horizontal(|ui| {

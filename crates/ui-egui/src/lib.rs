@@ -18,6 +18,7 @@ mod objects_tab;
 pub mod options_dialog;
 mod query_tab;
 pub mod state;
+pub mod structure_sync_tab;
 mod table_menu;
 mod table_tab;
 pub mod tasks;
@@ -44,7 +45,7 @@ pub fn parity() -> (usize, usize) {
 }
 
 /// Raise when parity rises; never lower it.
-pub const PARITY_FLOOR: usize = 20;
+pub const PARITY_FLOOR: usize = 21;
 
 #[cfg(test)]
 mod tests {

@@ -99,6 +99,10 @@ pub enum Action {
         table: Option<String>,
     },
     DesignerSave(usize),
+    /// Structure Synchronization: compare (background task) and deploy (job).
+    OpenStructureSync,
+    SyncCompare(usize),
+    SyncDeploy(usize),
     DesignerSaveAs(usize, String),
     DesignerPreview(usize),
     /// A table action (`table.delete`, `table.empty`, `table.truncate`, `table.duplicate`,
@@ -612,6 +616,33 @@ impl DbCraftApp {
                 }
                 Action::OpenDesigner { connection, database, schema, table } => self.open_designer(ctx, connection, database, schema, table),
                 Action::DesignerSave(i) => self.designer_save(i, None),
+                Action::OpenStructureSync => {
+                    let sel = self.state.selection.clone();
+                    let form = crate::structure_sync_tab::SyncForm::new(sel.as_ref().map(|s| s.connection.clone()), sel.and_then(|s| s.database));
+                    self.state.tabs.push(Tab::StructureSync(Box::new(form)));
+                    self.state.active_tab = self.state.tabs.len() - 1;
+                }
+                Action::SyncCompare(i) => {
+                    if let Some(Tab::StructureSync(f)) = self.state.tabs.get(i)
+                        && let Ok(params) = f.params(false)
+                    {
+                        let task = self.spawn_task(vec![("tools.structureSync", params)]);
+                        if let Some(Tab::StructureSync(f)) = self.state.tabs.get_mut(i) {
+                            // Keep the status: a compare also follows each deploy.
+                            f.task = Some(task);
+                            f.error = None;
+                        }
+                    }
+                }
+                Action::SyncDeploy(i) => {
+                    if let Some(Tab::StructureSync(f)) = self.state.tabs.get_mut(i)
+                        && let Ok(params) = f.params(true)
+                    {
+                        f.job = Job::spawn(ctx, &self.session, "tools.structureSync", params);
+                        f.job_seen = false;
+                        f.status = None;
+                    }
+                }
                 Action::DesignerSaveAs(i, name) => self.designer_save(i, Some(name)),
                 Action::DesignerPreview(i) => {
                     if let Some(Tab::Designer(t)) = self.state.tabs.get(i) {
@@ -970,7 +1001,8 @@ impl DbCraftApp {
                 self.tried.retain(|k| !k.ends_with(&format!("/{}/{db}", sel.connection)));
             }
         }
-        for t in &mut self.state.tabs {
+        let mut recompare = Vec::new();
+        for (ti, t) in self.state.tabs.iter_mut().enumerate() {
             match t {
                 Tab::Transfer(f) if f.job.started() && f.status.is_none() => {
                     if let Some(r) = f.job.result() {
@@ -979,6 +1011,22 @@ impl DbCraftApp {
                             Err(e) => e,
                         });
                         // Target trees may have new tables.
+                        self.session.tables.clear();
+                        self.session.objects.clear();
+                        self.tried.retain(|k| k.starts_with("c/"));
+                    }
+                }
+                Tab::StructureSync(f) if f.job.started() && !f.job_seen => {
+                    if let Some(r) = f.job.result() {
+                        f.job_seen = true;
+                        match r {
+                            Ok(v) => {
+                                f.status = Some(format!("Deployed {} change(s), {} error(s)", v["deployed"], v["errors"].as_array().map_or(0, Vec::len)));
+                                // Compare again: what's left (normally only unticked items).
+                                recompare.push(ti);
+                            }
+                            Err(e) => f.error = Some(e),
+                        }
                         self.session.tables.clear();
                         self.session.objects.clear();
                         self.tried.retain(|k| k.starts_with("c/"));
@@ -1006,6 +1054,10 @@ impl DbCraftApp {
                 }
                 _ => {}
             }
+        }
+        if !recompare.is_empty() {
+            let ctx = self.ctx_for_jobs.clone();
+            self.apply(&ctx, recompare.into_iter().map(Action::SyncCompare).collect());
         }
     }
 
@@ -1187,6 +1239,13 @@ impl DbCraftApp {
                 Some(Tab::Console(c)) => {
                     c.task = None;
                     Self::console_done(c, result);
+                }
+                Some(Tab::StructureSync(f)) => {
+                    f.task = None;
+                    match result {
+                        Ok(v) => f.set_result(&v),
+                        Err(e) => f.error = Some(e),
+                    }
                 }
                 Some(Tab::Designer(t)) => {
                     t.task = None;
@@ -1494,6 +1553,7 @@ impl DbCraftApp {
                 .and_then(|s| s.database.as_ref().map(|d| Action::Command("database.tables", json!({ "connection": s.connection, "database": d })))),
             "tools.dataTransfer" => Some(Action::Ui("ui.transfer")),
             "tools.options" => Some(Action::Ui("ui.options")),
+            "tools.structureSync" => Some(Action::OpenStructureSync),
             "backup.create" => Some(Action::Ui("ui.objects.backups")),
             "automation.save" => Some(Action::Ui("ui.automation")),
             "user.list" => Some(Action::Ui("ui.objects.users")),
@@ -1807,6 +1867,9 @@ impl DbCraftApp {
                         }
                         Tab::User(u) => (RichText::new(egui_phosphor::regular::USER).color(Tokens::text()), u.title(), false),
                         Tab::Designer(t) => (RichText::new(icons::PENCIL_SIMPLE).color(Tokens::accent()), t.title(), t.dirty() && t.loaded),
+                        Tab::StructureSync(_) => {
+                            (RichText::new(egui_phosphor::regular::GIT_DIFF).color(Tokens::accent()), "Structure Synchronization".into(), false)
+                        }
                     };
                     let active = i == self.state.active_tab;
                     let fill = if active { Tokens::bg() } else { Tokens::tab_inactive() };
@@ -1851,6 +1914,9 @@ impl DbCraftApp {
             Tab::Console(c) => crate::console_tab::show(ui, idx, c, &self.session, actions),
             Tab::Transfer(f) => crate::transfer_tab::show(ui, idx, f, &self.session, actions),
             Tab::Automation(v) => crate::automation_tab::show(ui, idx, v, &self.session, actions),
+            Tab::StructureSync(f) => {
+                egui::ScrollArea::vertical().id_salt(("ss_tab", idx)).show(ui, |ui| crate::structure_sync_tab::show(ui, idx, f, &self.session, actions));
+            }
             Tab::Designer(t) => {
                 let dialect = crate::query_tab::dialect_of(&self.session, Some(&t.connection));
                 let tables: Vec<String> = t
@@ -1898,6 +1964,7 @@ fn tab_task(t: &Tab) -> Option<&Task> {
         Tab::Table(t) => t.task.as_ref(),
         Tab::Console(c) => c.task.as_ref(),
         Tab::Designer(d) => d.task.as_ref(),
+        Tab::StructureSync(f) => f.task.as_ref(),
         _ => None,
     }
 }

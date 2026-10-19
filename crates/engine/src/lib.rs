@@ -16,6 +16,7 @@ mod params;
 mod query_cmds;
 mod saved_query_cmds;
 pub mod secrets;
+mod structure_sync_cmds;
 mod table_cmds;
 pub mod transfer;
 mod transfer_cmds;
