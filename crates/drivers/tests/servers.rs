@@ -270,3 +270,38 @@ fn table_schema_and_views() {
         assert!(!v.definition.contains("`sakila_lite`."), "database prefix stripped: {v:?}");
     }
 }
+
+/// Regression: Stop pressed at various moments must always stop the statement on the server
+/// (a race once woke the call before the server-side stop was registered, which abandoned the
+/// statement instead of cancelling it).
+#[test]
+#[ignore = "needs docker compose servers"]
+fn stop_is_reliable_at_any_moment() {
+    for (kind, port, sleep, active) in [
+        (DbKind::Postgres, 15432, "select pg_sleep(5)", "select count(*) from pg_stat_activity where query like 'select pg_sleep%' and state = 'active'"),
+        (DbKind::Mysql, 13306, "select sleep(5)", "select count(*) from information_schema.processlist where info like 'select sleep%'"),
+    ] {
+        let c = std::sync::Arc::<dyn dbcraft_drivers::Connection>::from(dbcraft_drivers::connect(&cfg(kind, port)).unwrap());
+        for round in 0..8u64 {
+            let cancel = dbcraft_drivers::Cancel::new();
+            let (c2, k2, sql) = (c.clone(), cancel.clone(), sleep.to_string());
+            let w = std::thread::spawn(move || dbcraft_drivers::with_cancel(&k2, || c2.query(Some("sakila_lite"), &sql)));
+            std::thread::sleep(std::time::Duration::from_millis(5 + round * 40));
+            cancel.cancel();
+            assert!(matches!(w.join().unwrap(), Err(dbcraft_core::Error::Cancelled)), "{kind:?} round {round}");
+            let mut left = 1;
+            for _ in 0..30 {
+                left = match &c.query(None, active).unwrap().rows[0][0] {
+                    Value::Int(n) => *n,
+                    Value::UInt(n) => *n as i64,
+                    v => panic!("{v:?}"),
+                };
+                if left == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert_eq!(left, 0, "{kind:?} round {round}: statement left running");
+        }
+    }
+}

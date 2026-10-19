@@ -164,7 +164,33 @@ fn backup_and_automation_from_the_ui() {
     assert!(h.query_by_label_contains("No backups").is_some());
     // The toolbar button, not the empty-state hint that mentions it.
     h.get_all_by_label_contains("New Backup").min_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).unwrap().click();
+    h.run();
+    // The Backup window: General (comment), Object Selection, Advanced, then Backup.
+    assert!(h.state().state.objects.backup_form.is_some(), "Backup window open");
+    h.state_mut().state.objects.backup_form.as_mut().unwrap().comment = "before cleanup".into();
+    h.get_by_label("Object Selection").click();
+    h.run();
+    h.get_by_label("Custom").click();
+    h.run();
+    assert!(h.query_by_label("film").is_some(), "tables to choose from");
+    h.get_by_label("Advanced").click();
+    h.run();
+    h.get_by_label("Use specified file name").click();
+    h.run();
+    h.state_mut().state.objects.backup_form.as_mut().unwrap().file_name = "before cleanup".into();
+    h.run();
+    h.get_by_label("Backup").click();
     wait(&mut h, |a| a.state.objects.backups.as_ref().is_some_and(|b| b.len() == 1));
+    let b = h.state().state.objects.backups.as_ref().unwrap()[0].clone();
+    assert_eq!((b.file.as_str(), b.comment.as_str(), b.format.as_str(), b.tables), ("before cleanup.dbcb", "before cleanup", "dbcb", 1));
+    assert_eq!(
+        h.state().state.objects.backup_form.as_ref().map(|f| f.page),
+        Some(dbcraft_ui_egui::backup_dialog::BackupPage::Log),
+        "Message Log while it runs"
+    );
+    h.get_by_label("Close").click();
+    h.run();
+    assert!(h.state().state.objects.backup_form.is_none());
 
     // Automation: New job → Backup step on src/main → Save → Start.
     h.state_mut().state.tabs.truncate(1);

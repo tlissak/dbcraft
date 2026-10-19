@@ -111,7 +111,6 @@ pub fn backups(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &m
     };
     let running = view.job.running();
     toolbar(ui, |ui| {
-        ui.add(egui::TextEdit::singleline(&mut view.backup_comment).hint_text("Comment (optional)").desired_width(200.0));
         if ui.add_enabled(!running, egui::Button::new(format!("{} New Backup", ph::ARCHIVE))).clicked() {
             actions.push(Action::BackupCreate);
         }
@@ -162,7 +161,12 @@ pub fn backups(ui: &mut Ui, sel: &Selection, view: &mut ObjectsView, actions: &m
                     let Some(b) = list.get(row.index()) else { return };
                     row.set_selected(view.selected_backup.as_deref() == Some(b.path.as_str()));
                     row.col(|ui| {
-                        ui.label(format!("{}  {}", ph::ARCHIVE, b.file.trim_end_matches(".sql")));
+                        let name = b.file.trim_end_matches(".sql").trim_end_matches(".dbcb");
+                        if b.complete {
+                            ui.label(format!("{}  {name}", ph::ARCHIVE));
+                        } else {
+                            ui.colored_label(Tokens::error(), format!("{}  {name} (incomplete)", ph::WARNING));
+                        }
                     });
                     row.col(|ui| {
                         ui.label(&b.created);

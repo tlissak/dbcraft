@@ -5,6 +5,7 @@
 pub mod alter;
 mod automation_cmds;
 mod backup_cmds;
+pub mod backup_format;
 mod commands;
 mod connection_cmds;
 mod data_cmds;

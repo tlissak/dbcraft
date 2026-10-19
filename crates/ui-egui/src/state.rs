@@ -284,6 +284,8 @@ pub struct ObjectsView {
     pub confirm_restore: Option<String>,
     pub confirm_delete_user: Option<(String, Option<String>)>,
     pub confirm_delete_backup: Option<String>,
+    /// The Backup window (Some while open).
+    pub backup_form: Option<crate::backup_dialog::BackupForm>,
     #[serde(skip)]
     pub job: Job,
     /// The finished job's result has been handled.

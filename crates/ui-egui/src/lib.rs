@@ -3,6 +3,7 @@
 
 pub(crate) mod app;
 mod automation_tab;
+pub mod backup_dialog;
 mod conn_dialog;
 mod console_tab;
 pub mod control;

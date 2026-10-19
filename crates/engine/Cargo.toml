@@ -16,6 +16,8 @@ serde_json.workspace = true
 log.workspace = true
 chrono.workspace = true
 keyring.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 [lints]
 workspace = true

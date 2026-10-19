@@ -47,10 +47,14 @@ impl Cancel {
         if self.0.cancelled.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.0.notify.notify_waiters();
+        // Mark the server-side stop before waking the call: woken first, it would see no stop
+        // coming, abandon the statement at once and leave it running on the server.
         let kill = self.0.kill.lock().unwrap_or_else(PoisonError::into_inner).take();
-        if let Some(kill) = kill {
+        if kill.is_some() {
             self.0.killed.store(true, Ordering::SeqCst);
+        }
+        self.0.notify.notify_waiters();
+        if let Some(kill) = kill {
             kill();
         }
     }
@@ -109,6 +113,34 @@ impl Drop for KillGuard {
             c.0.kill.lock().unwrap_or_else(PoisonError::into_inner).take();
         }
     }
+}
+
+/// Marks a statement as finished when dropped (it completed, failed or was abandoned).
+pub struct DoneGuard(pub Arc<AtomicBool>);
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Send a server-side stop, again every 300 ms, until the statement has ended (Stop may land
+/// before the statement reaches the server, when a cancel finds the session idle and does
+/// nothing). Gives up after ~3 s.
+pub fn repeat_kill<F, Fut>(done: Arc<AtomicBool>, attempt: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    spawn(async move {
+        for _ in 0..10 {
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            attempt().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    });
 }
 
 /// Fire-and-forget a future on the shared runtime (server-side cancel requests).

@@ -60,14 +60,19 @@ pub fn escape_like(value: &str) -> String {
 }
 
 /// Split a script on top-level `;`, ignoring semicolons inside strings, quoted identifiers,
-/// comments and PostgreSQL dollar-quoted bodies. Returns trimmed, non-empty statements without the
-/// trailing `;`. Never panics: unterminated quotes or comments run to the end of the input.
+/// comments, PostgreSQL dollar-quoted bodies and `BEGIN … END` bodies of `CREATE TRIGGER /
+/// PROCEDURE / FUNCTION / EVENT`. Returns trimmed, non-empty statements without the trailing `;`.
+/// Never panics: unterminated quotes or comments run to the end of the input.
 pub fn split_statements(dialect: Dialect, sql: &str) -> Vec<String> {
     let chars: Vec<char> = sql.chars().collect();
     let at = |j: usize| chars.get(j).copied();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut i = 0;
+    // Open BEGIN/CASE blocks inside a compound statement's body.
+    let mut depth: i32 = 0;
+    // The previous keyword was END (to recognise `END IF`, `END LOOP`…).
+    let mut after_end = false;
 
     while let Some(c) = at(i) {
         match c {
@@ -144,9 +149,38 @@ pub fn split_statements(dialect: Dialect, sql: &str) -> Vec<String> {
                     }
                 }
             }
+            ';' if depth > 0 => {
+                cur.push(c);
+                i += 1;
+            }
             ';' => {
                 push_stmt(&mut out, &mut cur);
                 i += 1;
+                after_end = false;
+            }
+            c if (c.is_alphabetic() || c == '_') && !i.checked_sub(1).and_then(at).is_some_and(|p| p.is_alphanumeric() || p == '_') => {
+                let start = i;
+                while at(i).is_some_and(|d| d.is_alphanumeric() || d == '_') {
+                    i += 1;
+                }
+                let word: String = chars.get(start..i).map(|w| w.iter().collect()).unwrap_or_default();
+                let upper = word.to_ascii_uppercase();
+                let closes_other = matches!(upper.as_str(), "IF" | "LOOP" | "WHILE" | "REPEAT");
+                if after_end && closes_other {
+                    // `END IF` etc.: the END closed this keyword's block, not a BEGIN.
+                    depth += 1;
+                }
+                after_end = false;
+                match upper.as_str() {
+                    "BEGIN" if depth > 0 || is_compound(&cur) => depth += 1,
+                    "CASE" if depth > 0 => depth += 1,
+                    "END" if depth > 0 => {
+                        depth -= 1;
+                        after_end = true;
+                    }
+                    _ => {}
+                }
+                cur.push_str(&word);
             }
             _ => {
                 cur.push(c);
@@ -156,6 +190,14 @@ pub fn split_statements(dialect: Dialect, sql: &str) -> Vec<String> {
     }
     push_stmt(&mut out, &mut cur);
     out
+}
+
+/// A `CREATE [OR REPLACE] [DEFINER=…] [TEMP] TRIGGER / PROCEDURE / FUNCTION / EVENT` statement,
+/// whose body may hold `;`-separated statements between BEGIN and END.
+fn is_compound(stmt: &str) -> bool {
+    let code: String = stmt.lines().filter(|l| !l.trim_start().starts_with("--")).collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+    let mut words = code.split_whitespace();
+    words.next() == Some("CREATE") && words.take(6).any(|w| matches!(w, "TRIGGER" | "PROCEDURE" | "FUNCTION" | "EVENT"))
 }
 
 fn take_line(chars: &[char], mut i: usize, cur: &mut String) -> usize {
@@ -187,6 +229,23 @@ fn is_only_line_comments(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_compound_bodies_whole() {
+        let s = "create trigger t after insert on film begin insert into log values (new.title); update n set c = c + 1; end; select 1;";
+        assert_eq!(
+            split_statements(Dialect::Sqlite, s),
+            vec!["create trigger t after insert on film begin insert into log values (new.title); update n set c = c + 1; end", "select 1"]
+        );
+        let my = "CREATE PROCEDURE p() BEGIN IF x THEN SELECT CASE WHEN a THEN 1 ELSE 2 END; END IF; WHILE y DO SET y = 0; END WHILE; END; SELECT 2";
+        assert_eq!(split_statements(Dialect::Mysql, my).len(), 2, "{:?}", split_statements(Dialect::Mysql, my));
+        // A transaction BEGIN is not a body.
+        assert_eq!(split_statements(Dialect::Sqlite, "begin; insert into t values (1); commit;").len(), 3);
+        // `end` inside strings and identifiers doesn't count.
+        assert_eq!(split_statements(Dialect::Sqlite, "create trigger t after insert on x begin select 'end'; select ending; end; select 3").len(), 2);
+        // Unbalanced: runs to the end, never panics.
+        assert_eq!(split_statements(Dialect::Sqlite, "create trigger t after insert on x begin select 1;").len(), 1);
+    }
 
     #[test]
     fn splits_simple_script() {

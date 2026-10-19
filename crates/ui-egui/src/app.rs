@@ -61,7 +61,10 @@ pub enum Action {
     Automation(usize, AutoAct),
     SetObjectsMode(ObjectsMode),
     LoadBackups,
+    /// Open the Backup window.
     BackupCreate,
+    /// Start the backup set up in the Backup window.
+    BackupStart,
     BackupRestore(String),
     BackupDelete(String),
     BackupOpenFolder,
@@ -521,10 +524,18 @@ impl DbCraftApp {
                     if let Some(sel) = &self.state.selection
                         && let Some(db) = &sel.database
                     {
-                        let params = json!({"connection": sel.connection, "database": db, "comment": self.state.objects.backup_comment});
-                        self.state.objects.job = Job::spawn(ctx, &self.session, "backup.create", params);
+                        let objects = self.session.tables.get(&(sel.connection.clone(), db.clone())).cloned().unwrap_or_default();
+                        self.state.objects.backup_form = Some(crate::backup_dialog::BackupForm::new(sel.connection.clone(), db.clone(), &objects));
+                    }
+                }
+                Action::BackupStart => {
+                    if let Some(form) = &mut self.state.objects.backup_form
+                        && let Ok(params) = form.params()
+                    {
+                        let job = Job::spawn(ctx, &self.session, "backup.create", params);
+                        form.job = job.clone();
+                        self.state.objects.job = job;
                         self.state.objects.job_seen = false;
-                        self.state.objects.backup_comment.clear();
                     }
                 }
                 Action::BackupRestore(path) => {
@@ -2059,6 +2070,12 @@ impl eframe::App for DbCraftApp {
             }
         }
         self.confirm_and_rename_windows(ctx, &mut actions);
+        if let Some(form) = &mut self.state.objects.backup_form {
+            let dialect = crate::query_tab::dialect_of(&self.session, Some(&form.connection));
+            if let crate::backup_dialog::Outcome::Close = crate::backup_dialog::show(ctx, form, dialect, &mut actions) {
+                self.state.objects.backup_form = None;
+            }
+        }
         if self.state.show_about {
             egui::Window::new("About DbCraft").open(&mut self.state.show_about).collapsible(false).show(ctx, |ui| {
                 ui.heading("DbCraft");

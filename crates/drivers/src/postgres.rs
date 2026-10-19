@@ -14,8 +14,8 @@ use sqlx::types::{Decimal, JsonValue, Uuid};
 use sqlx::{AssertSqlSafe, Row};
 
 use crate::common::{
-    CONNECT_TIMEOUT, block_on, cell_bool, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, returns_rows, run_atomic,
-    spawn, split_list,
+    CONNECT_TIMEOUT, DoneGuard, block_on, cell_bool, cell_str, cell_u64, columns_of, current_cancel, db_err, decode_row, on_cancel, probe, repeat_kill,
+    returns_rows, run_atomic, split_list,
 };
 
 /// Connections per database pool: a query tab, a table tab and the tree can work at once.
@@ -409,14 +409,22 @@ impl crate::Connection for PgConn {
             // With a Stop button, remember the backend so Stop can cancel the statement server-side.
             let _kill = if cancellable {
                 let pid: i32 = sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut *conn).await?;
-                Some(on_cancel(move || {
-                    spawn(async move {
-                        if let Ok(mut c) = <sqlx::PgConnection as sqlx::Connection>::connect_with(&kill_opts).await {
-                            let _ = sqlx::query("select pg_cancel_backend($1)").bind(pid).execute(&mut c).await;
-                            let _ = sqlx::Connection::close(c).await;
-                        }
-                    })
-                }))
+                let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = done.clone();
+                Some((
+                    on_cancel(move || {
+                        repeat_kill(flag, move || {
+                            let opts = kill_opts.clone();
+                            async move {
+                                if let Ok(mut c) = <sqlx::PgConnection as sqlx::Connection>::connect_with(&opts).await {
+                                    let _ = sqlx::query("select pg_cancel_backend($1)").bind(pid).execute(&mut c).await;
+                                    let _ = sqlx::Connection::close(c).await;
+                                }
+                            }
+                        })
+                    }),
+                    DoneGuard(done),
+                ))
             } else {
                 None
             };
